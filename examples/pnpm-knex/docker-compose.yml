@@ -1,0 +1,21 @@
+# Uses the locally-built petri image. Build it once from the repo root:
+#
+#     docker build -t petri:postgres ../..
+#
+# The service is named `postgres` so app/test code uses host `postgres` —
+# petri:postgres is a drop-in for the upstream postgres image.
+services:
+  postgres:
+    image: petri:postgres
+    environment:
+      POSTGRES_USER: appuser
+      POSTGRES_PASSWORD: apppass
+      POSTGRES_DB: appdb
+    ports:
+      - "5432:5432"   # passthrough — app + migrations connect here
+      - "5433:5433"   # fork-per-connection — tests connect here
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -p 5434 -U appuser -d appdb"]
+      interval: 1s
+      timeout: 3s
+      retries: 30
