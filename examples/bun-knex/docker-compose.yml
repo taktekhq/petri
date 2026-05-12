@@ -1,7 +1,6 @@
 services:
   postgres:
-    # image: ghcr.io/taktekhq/petri-postgres:16.4-0.1-alpha
-    build: ../..
+    image: ghcr.io/taktekhq/petri-postgres:16.4-0.1-alpha
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
