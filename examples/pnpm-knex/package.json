@@ -7,7 +7,7 @@
     "migrate": "knex --knexfile ./knexfile.ts migrate:latest",
     "seed": "knex --knexfile ./knexfile.ts seed:run",
     "start": "ts-node src/server.ts",
-    "test": "jest"
+    "test": "PGPORT=5433 jest"
   },
   "dependencies": {
     "express": "^4.21.2",

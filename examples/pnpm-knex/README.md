@@ -12,7 +12,7 @@ src/
   app.ts                       # mounts the routes
   server.ts                    # production entrypoint (port 5432)
   db/
-    connection.ts              # newDB({ port }) — pool max=1
+    connection.ts              # dbConfig() + newDB() — pool max=1; PGPORT-driven
     migrations/                # users, stores, products
     seeds/                     # fixture rows every fork inherits
     queries/

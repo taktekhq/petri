@@ -1,21 +1,15 @@
 import type { Knex } from 'knex';
+import { dbConfig } from './src/db/connection';
 
-const host = process.env.PGHOST ?? 'postgres';
-const port = Number(process.env.PGPORT ?? 5432);
-
-// Migrations and seeds always go through the passthrough port (5432) so
-// they land on the real template DB. Every fork on :5433 inherits the
-// schema and seed data.
+// The knex CLI loads this for migrations and seeds. Connection details
+// come from src/db/connection.ts so there's exactly one place to change
+// them. The CLI is invoked with PGPORT unset (defaulting to :5432
+// passthrough), so migrations and seeds land on the real template DB and
+// every fork on :5433 inherits them.
 const config: { [env: string]: Knex.Config } = {
   development: {
     client: 'pg',
-    connection: {
-      host,
-      port,
-      user: 'appuser',
-      password: 'apppass',
-      database: 'appdb',
-    },
+    connection: dbConfig(),
     migrations: { directory: './src/db/migrations', extension: 'ts' },
     seeds: { directory: './src/db/seeds', extension: 'ts' },
   },
