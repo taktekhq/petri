@@ -1,0 +1,11 @@
+/petri
+/cmd/petri/petri
+*.test
+*.out
+.idea/
+.vscode/
+
+# Vendor is not committed; the Docker build fetches modules at build time.
+# Locally we regenerate it on demand (`go mod vendor`) — handy for offline
+# builds, but never checked in.
+/vendor/
