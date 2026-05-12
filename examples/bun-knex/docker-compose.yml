@@ -1,7 +1,7 @@
 services:
   postgres:
-    # image: petri:postgres  # local build: docker build -t petri:postgres ../..
-    image: ghcr.io/taktekhq/petri:0.1-alpha
+    # image: ghcr.io/taktekhq/petri:0.1-alpha
+    build: ../..
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres

@@ -41,9 +41,9 @@ docker compose run --rm app bun test           # PGPORT=5433, fork per test
 docker compose run --rm --service-ports app bun run start   # if you want HTTP
 ```
 
-The compose pulls `ghcr.io/taktekhq/petri:0.1-alpha`. To build locally
-instead, swap the commented `image:` line for the active one and run
-`docker build -t petri:postgres ../..` first.
+The compose builds the petri image from the repo root on first
+`docker compose up`. To pull a published build instead, swap the active
+`build:` line for the commented `image:` one above it.
 
 ## How parallel isolation works
 
