@@ -32,26 +32,44 @@ const (
 )
 
 // TestImage_SmokeSelectOne is the first thing to break if the entrypoint or
-// the bundled binary is wrong: a single client must be able to query.
+// the bundled binary is wrong: a single client must be able to query through
+// the drop-in (passthrough) port.
 func TestImage_SmokeSelectOne(t *testing.T) {
 	skipIfShort(t)
-	addr := startPetriImage(t, "")
+	addrs := startPetriImage(t, "")
 
-	db := openPGX(t, addr, "")
+	db := openPGX(t, addrs.passthrough, "")
 	var n int
 	require.NoError(t, db.QueryRow("SELECT 1").Scan(&n))
 	require.Equal(t, 1, n)
 }
 
-// TestImage_IsolatesConnections is the user-visible Phase 3 contract on the
-// shipping artifact: two clients connecting to the same logical database
-// land on independent forks and can't see each other's writes.
-func TestImage_IsolatesConnections(t *testing.T) {
+// TestImage_PassthroughSharesOneDatabase pins the drop-in contract: clients
+// on the passthrough port all see the same database — a write from one
+// connection is visible on the next. This is what makes petri:postgres a
+// transparent replacement for postgres on the standard 5432.
+func TestImage_PassthroughSharesOneDatabase(t *testing.T) {
 	skipIfShort(t)
-	addr := startPetriImage(t, "")
+	addrs := startPetriImage(t, "")
 
-	a := openPGX(t, addr, "client-a")
-	b := openPGX(t, addr, "client-b")
+	writer := openPGX(t, addrs.passthrough, "writer")
+	mustExec(t, writer, "CREATE TABLE shared (n int)")
+	mustExec(t, writer, "INSERT INTO shared VALUES (42)")
+	require.NoError(t, writer.Close())
+
+	reader := openPGX(t, addrs.passthrough, "reader")
+	require.Equal(t, 42, scanInt(t, reader, "SELECT n FROM shared"))
+}
+
+// TestImage_ForkPortIsolatesConnections is the user-visible forking contract
+// on the shipping artifact: two clients on the fork port land on independent
+// forks and can't see each other's writes.
+func TestImage_ForkPortIsolatesConnections(t *testing.T) {
+	skipIfShort(t)
+	addrs := startPetriImage(t, "")
+
+	a := openPGX(t, addrs.fork, "client-a")
+	b := openPGX(t, addrs.fork, "client-b")
 
 	mustExec(t, a, "CREATE TABLE t (id int)")
 	mustExec(t, a, "INSERT INTO t VALUES (1)")
@@ -62,23 +80,22 @@ func TestImage_IsolatesConnections(t *testing.T) {
 	require.Equal(t, 2, scanInt(t, b, "SELECT id FROM t"))
 }
 
-// TestImage_DropsForkOnDisconnect is the Phase-4a contract on the shipping
-// artifact: closing a client connection causes its fork to disappear from
-// pg_database soon after.
-func TestImage_DropsForkOnDisconnect(t *testing.T) {
+// TestImage_ForkPortDropsForkOnDisconnect: closing a fork-port client causes
+// its fork to disappear from pg_database soon after.
+func TestImage_ForkPortDropsForkOnDisconnect(t *testing.T) {
 	skipIfShort(t)
-	addr := startPetriImage(t, "")
+	addrs := startPetriImage(t, "")
 
-	a := openPGX(t, addr, "")
+	a := openPGX(t, addrs.fork, "")
 	var aFork string
 	require.NoError(t, a.QueryRow("SELECT current_database()").Scan(&aFork))
 	require.True(t, strings.HasPrefix(aFork, "petri_"), "expected petri_ prefix, got %q", aFork)
 
 	require.NoError(t, a.Close())
 
-	// Open a new connection (lands on a different fork) and use it to poll
-	// pg_database for aFork's disappearance.
-	probe := openPGX(t, addr, "")
+	// Open a new fork-port connection (lands on a different fork) and use it
+	// to poll pg_database for aFork's disappearance.
+	probe := openPGX(t, addrs.fork, "")
 	require.Eventually(t, func() bool {
 		return !databaseExists(t, probe, aFork)
 	}, 10*time.Second, 200*time.Millisecond, "fork %q was not dropped", aFork)
@@ -86,12 +103,21 @@ func TestImage_DropsForkOnDisconnect(t *testing.T) {
 
 // ---- helpers ----
 
+// petriAddrs is the pair of host:port addresses petri exposes: the
+// passthrough port (drop-in postgres surface) and the fork port (a fresh
+// forked database per connection).
+type petriAddrs struct {
+	passthrough string
+	fork        string
+}
+
 // startPetriImage builds the image (cached after first run) and starts a
-// container, returning the host:port reachable from the test process. If
-// initSQL is non-empty it is written into /docker-entrypoint-initdb.d/ so
-// Postgres runs it once during init — the schema/seed lands on the template
-// database that subsequent forks copy from.
-func startPetriImage(t *testing.T, initSQL string) string {
+// container, returning the passthrough and fork addresses reachable from
+// the test process. If initSQL is non-empty it is written into
+// /docker-entrypoint-initdb.d/ so Postgres runs it once during init — the
+// schema/seed lands on the template database that subsequent forks copy
+// from.
+func startPetriImage(t *testing.T, initSQL string) petriAddrs {
 	t.Helper()
 	ctx := context.Background()
 
@@ -103,7 +129,7 @@ func startPetriImage(t *testing.T, initSQL string) string {
 			Tag:        "test",
 			KeepImage:  true,
 		},
-		ExposedPorts: []string{"5432/tcp"},
+		ExposedPorts: []string{"5432/tcp", "5433/tcp"},
 		Env: map[string]string{
 			"POSTGRES_USER":     pgUser,
 			"POSTGRES_PASSWORD": pgPassword,
@@ -128,9 +154,14 @@ func startPetriImage(t *testing.T, initSQL string) string {
 
 	host, err := c.Host(ctx)
 	require.NoError(t, err)
-	port, err := c.MappedPort(ctx, "5432/tcp")
+	passthroughPort, err := c.MappedPort(ctx, "5432/tcp")
 	require.NoError(t, err)
-	return net.JoinHostPort(host, port.Port())
+	forkPort, err := c.MappedPort(ctx, "5433/tcp")
+	require.NoError(t, err)
+	return petriAddrs{
+		passthrough: net.JoinHostPort(host, passthroughPort.Port()),
+		fork:        net.JoinHostPort(host, forkPort.Port()),
+	}
 }
 
 // repoRoot finds the repo root by walking up from this source file. We can't

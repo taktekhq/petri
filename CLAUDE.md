@@ -1,7 +1,12 @@
 # Petri — orientation for Claude
 
-Postgres proxy that gives each TCP client its own forked database.
-Drop-in: `image: postgres` → `image: petri:postgres`.
+Postgres proxy with two listeners on one backend:
+- `:5432` passthrough — transparent proxy, drop-in for `postgres`.
+- `:5433` fork-per-connection — every TCP client lands on its own
+  `CREATE DATABASE … TEMPLATE …` copy, dropped on disconnect.
+
+Drop-in: `image: postgres` → `image: petri:postgres` keeps `:5432` working
+as before; tests opt in to forking by hitting `:5433`.
 
 ## Layout
 
@@ -23,15 +28,18 @@ Every `*.go` has a matching `_test.go`.
 ```
 handleClient(client):
     startup.Read(client)            # parse, reject SSL/GSS
-    OnStartup(info)                 # forks DB, mutates info.Database
+    OnStartup(info)                 # fork port: forks DB, mutates info.Database
+                                    # passthrough port: hook is nil, info untouched
     net.Dial(BackendAddr)           # then info.WriteTo(backend) replays startup
     bridge(client, backend)         # pipe until either side closes
-    cleanup()                       # drops the fork
+    cleanup()                       # fork port only: drops the fork
 ```
 
-The hook lives in `cmd/petri/main.go:forkPerConnection`. Admin DSN is built
-once at startup from `POSTGRES_USER` + `POSTGRES_PASSWORD` + `PGPORT`. Client
-queries flow through the bridge with their own credentials.
+`cmd/petri/main.go` spins two `proxy.Proxy` instances over one backend —
+the passthrough listener has a nil `OnStartup`, the fork listener uses
+`forkPerConnection`. Admin DSN is built once at startup from
+`POSTGRES_USER` + `POSTGRES_PASSWORD` + `PGPORT`. Client queries flow
+through the bridge with their own credentials.
 
 ## Conventions
 
@@ -60,7 +68,9 @@ docker build -t petri:postgres .
 - `Drop` evicts straggler sessions before `DROP DATABASE` to win the race
   with Postgres's per-session cleanup.
 - SSL/GSS handshakes are answered with `N` so the rest is plaintext.
-- Each TCP connection is its own fork. Pools with `max > 1` will land
-  on different forks; tests must hold a single connection.
+- Each TCP connection on `:5433` is its own fork. Pools with `max > 1`
+  will land on different forks; tests must hold a single connection.
+- `:5432` is plain passthrough — no fork, no hook side-effects. Use it
+  for app-managed migrations and dev workloads against the real DB.
 - In restricted networks, pre-run `go mod vendor` — `go build` picks it up
   automatically (Go ≥ 1.14).

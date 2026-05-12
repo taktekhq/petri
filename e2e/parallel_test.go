@@ -32,14 +32,14 @@ INSERT INTO widgets VALUES
 func TestImage_ParallelWorkersSeeIndependentForks(t *testing.T) {
 	skipIfShort(t)
 
-	addr := startPetriImage(t, schemaWithSeed)
+	addrs := startPetriImage(t, schemaWithSeed)
 
 	const workers = 8
 	for i := 0; i < workers; i++ {
 		i := i
 		t.Run(fmt.Sprintf("worker-%02d", i), func(t *testing.T) {
 			t.Parallel()
-			db := openPGX(t, addr, fmt.Sprintf("worker-%02d", i))
+			db := openPGX(t, addrs.fork, fmt.Sprintf("worker-%02d", i))
 
 			// Every fork starts from the seeded template.
 			require.Equal(t, 3, scanInt(t, db, "SELECT count(*) FROM widgets"),
@@ -72,14 +72,14 @@ func TestImage_ParallelWorkersSeeIndependentForks(t *testing.T) {
 func TestImage_ParallelWorkersCanWriteSameTableName(t *testing.T) {
 	skipIfShort(t)
 
-	addr := startPetriImage(t, "")
+	addrs := startPetriImage(t, "")
 
 	const workers = 8
 	for i := 0; i < workers; i++ {
 		i := i
 		t.Run(fmt.Sprintf("worker-%02d", i), func(t *testing.T) {
 			t.Parallel()
-			db := openPGX(t, addr, fmt.Sprintf("worker-%02d", i))
+			db := openPGX(t, addrs.fork, fmt.Sprintf("worker-%02d", i))
 
 			mustExec(t, db, "CREATE TABLE only_mine (n int)")
 			mustExec(t, db, fmt.Sprintf("INSERT INTO only_mine VALUES (%d)", i))
