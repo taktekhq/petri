@@ -57,9 +57,9 @@ the client's own credentials, preserving permissions and RLS.
 
 | Env var                  | Default    | Used for                                |
 | ------------------------ | ---------- | --------------------------------------- |
-| `POSTGRES_USER`          | `appuser`  | Admin user for CREATE/DROP DATABASE     |
-| `POSTGRES_PASSWORD`      | `apppass`  | Admin password — override for prod      |
-| `POSTGRES_DB`            | `appdb`    | Template DB the postgres image creates  |
+| `POSTGRES_USER`          | `postgres` | Admin user for CREATE/DROP DATABASE     |
+| `POSTGRES_PASSWORD`      | (required) | Admin password                          |
+| `POSTGRES_DB`            | `postgres` | Template DB the postgres image creates  |
 | `PGPORT`                 | `5434`     | Loopback Postgres port (inside image)   |
 | `PETRI_PASSTHROUGH_ADDR` | `:5432`    | Where petri's passthrough listener binds |
 | `PETRI_FORK_ADDR`        | `:5433`    | Where petri's fork listener binds       |

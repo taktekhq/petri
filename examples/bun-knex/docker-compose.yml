@@ -2,4 +2,11 @@ services:
   postgres:
     # image: petri:postgres  # local build: docker build -t petri:postgres ../..
     image: ghcr.io/taktekhq/petri:0.1-alpha
-    ports: ["5432-5433:5432-5433"]
+    environment:
+      POSTGRES_HOST_AUTH_METHOD: trust
+
+  app:
+    image: oven/bun:1
+    working_dir: /app
+    volumes: [".:/app"]
+    depends_on: [postgres]

@@ -28,15 +28,6 @@ RUN chmod +x /usr/local/bin/petri-entrypoint.sh
 # listeners — 5432 passthrough (drop-in) and 5433 fork-per-connection.
 # Postgres is pushed off 5433 onto 5434 so 5433 is free for petri.
 ENV PGPORT=5434
-
-# Sane defaults so `image: petri:postgres` (or the published GHCR image)
-# works in compose with no env vars set — petri is a testing/dev image,
-# not a production database. Override POSTGRES_PASSWORD (and the user/DB
-# if you want) for any real workload; the values below are public.
-ENV POSTGRES_USER=appuser \
-    POSTGRES_PASSWORD=apppass \
-    POSTGRES_DB=appdb
-
 EXPOSE 5432 5433
 
 ENTRYPOINT ["/usr/local/bin/petri-entrypoint.sh"]

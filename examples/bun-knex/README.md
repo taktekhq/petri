@@ -8,7 +8,7 @@ petri fork.
 ## Layout
 
 ```
-docker-compose.yml             # one service, the petri image
+docker-compose.yml             # postgres (petri) + app (bun) — no ports
 src/
   db.ts                        # newDB() — single source of truth
   crud.ts                      # crud(table, fields) → router factory
@@ -28,24 +28,29 @@ test/
 
 ## Run it
 
+Everything runs inside compose — no ports are published to the host and
+no extra env vars are needed (the postgres service uses
+`POSTGRES_HOST_AUTH_METHOD=trust`, so the default `postgres` user/db
+work passwordless).
+
 ```bash
-docker compose up -d
-bun install
-bun run migrate                         # PGPORT=5432, populates template
-bun test                                # PGPORT=5433, fork per test
-bun run start                           # http://localhost:3000
+docker compose run --rm app bun install
+docker compose run --rm app bun run migrate    # PGPORT=5432, seeds template
+docker compose run --rm app bun test           # PGPORT=5433, fork per test
+docker compose run --rm --service-ports app bun run start   # if you want HTTP
 ```
 
-The compose file pulls `ghcr.io/taktekhq/petri:0.1-alpha`. To build
-locally instead, swap the commented `image:` line for the active one
-and run `docker build -t petri:postgres ../..` first.
+The compose pulls `ghcr.io/taktekhq/petri:0.1-alpha`. To build locally
+instead, swap the commented `image:` line for the active one and run
+`docker build -t petri:postgres ../..` first.
 
 ## How parallel isolation works
 
 - `bun test` runs each `*.test.ts` file in its own worker.
-- Inside every test, `withApp()` opens one TCP connection to `:5433` —
-  petri runs `CREATE DATABASE … TEMPLATE appdb`, the connection lands
-  on that fork, and `db.destroy()` closes it so petri drops the fork.
+- Inside every test, `withApp()` opens one TCP connection to
+  `postgres:5433` — petri runs `CREATE DATABASE … TEMPLATE postgres`,
+  the connection lands on that fork, and `db.destroy()` closes it so
+  petri drops the fork.
 - `pool: { min: 1, max: 1 }` is critical: one connection = one fork.
 - `migrate` and `start` use the default `PGPORT=5432` (passthrough);
   the `test` script sets `PGPORT=5433`. No code branches on this — the
