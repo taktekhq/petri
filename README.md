@@ -1,7 +1,9 @@
 # petri
 
 A Postgres proxy that gives each TCP client its own forked database.
-Drop-in replacement for `postgres` in docker-compose for parallel-test workloads.
+Drop-in replacement for `postgres:16.4-alpine` for parallel-test workloads.
+
+In docker-compose, swap the image:
 
 ```yaml
 db:
@@ -10,8 +12,13 @@ db:
     POSTGRES_USER: appuser
     POSTGRES_PASSWORD: apppass
     POSTGRES_DB: appdb
-  volumes:
-    - ./migrations:/docker-entrypoint-initdb.d/:ro
+```
+
+Or in your own Dockerfile, swap the base:
+
+```Dockerfile
+FROM petri:postgres
+COPY init.sh /docker-entrypoint-initdb.d/
 ```
 
 Build it once until it's published:
@@ -19,6 +26,8 @@ Build it once until it's published:
 ```bash
 docker build -t petri:postgres .
 ```
+
+Postgres 16.4-alpine is the only supported base.
 
 ## How it works
 

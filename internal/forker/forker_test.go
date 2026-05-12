@@ -89,7 +89,7 @@ func startPostgres(t *testing.T) pgContainer {
 	t.Helper()
 	c := context.Background()
 	pg, err := postgres.Run(c,
-		"postgres:16-alpine",
+		"postgres:16.4-alpine",
 		postgres.WithDatabase(template),
 		postgres.WithUsername(pgUser),
 		postgres.WithPassword(pgPassword),
