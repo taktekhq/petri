@@ -18,22 +18,75 @@ import (
 )
 
 const (
-	testDB   = "appdb"
-	testUser = "appuser"
-	testPass = "apppass"
+	pgDatabase = "appdb"
+	pgUser     = "appuser"
+	pgPassword = "apppass"
 )
 
-// startBackend boots a Postgres container shared across the tests in this
-// package. Returned address is host:port reachable from the test process.
-func startBackend(t *testing.T) string {
+// TestProxy_SelectOne is the wire-level smoke test: a real pgx client through
+// the proxy can complete a query against real Postgres.
+func TestProxy_SelectOne(t *testing.T) {
+	addr := startProxyToPostgres(t)
+	db := openPGX(t, addr)
+
+	var n int
+	require.NoError(t, db.QueryRow("SELECT 1").Scan(&n))
+	require.Equal(t, 1, n)
+}
+
+// TestProxy_ParallelConnections proves connections don't interfere — the
+// foundation that the forking work depends on.
+func TestProxy_ParallelConnections(t *testing.T) {
+	addr := startProxyToPostgres(t)
+
+	for i := 0; i < 8; i++ {
+		i := i
+		t.Run(fmt.Sprintf("conn-%d", i), func(t *testing.T) {
+			t.Parallel()
+			db := openPGX(t, addr)
+			var got int
+			require.NoError(t, db.QueryRow("SELECT $1::int", i).Scan(&got))
+			require.Equal(t, i, got)
+		})
+	}
+}
+
+// TestProxy_ServeReturnsOnListenerClose pins the shutdown contract that test
+// cleanup and `main` rely on.
+func TestProxy_ServeReturnsOnListenerClose(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+
+	done := serveAsync(&proxy.Proxy{BackendAddr: "127.0.0.1:1"}, ln)
+	require.NoError(t, ln.Close())
+
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("Serve did not return after listener close")
+	}
+}
+
+// ---- helpers ----
+
+// startProxyToPostgres boots a fresh Postgres + proxy pair and returns the
+// proxy's listen address. One call per test keeps the data isolated.
+func startProxyToPostgres(t *testing.T) string {
+	t.Helper()
+	backend := startPostgres(t)
+	return startProxy(t, backend)
+}
+
+func startPostgres(t *testing.T) string {
 	t.Helper()
 	ctx := context.Background()
 
 	pg, err := postgres.Run(ctx,
 		"postgres:16-alpine",
-		postgres.WithDatabase(testDB),
-		postgres.WithUsername(testUser),
-		postgres.WithPassword(testPass),
+		postgres.WithDatabase(pgDatabase),
+		postgres.WithUsername(pgUser),
+		postgres.WithPassword(pgPassword),
 		testcontainers.WithWaitStrategy(
 			wait.ForLog("database system is ready to accept connections").
 				WithOccurrence(2).
@@ -50,84 +103,29 @@ func startBackend(t *testing.T) string {
 	return net.JoinHostPort(host, port.Port())
 }
 
-// startProxy launches a proxy.Proxy on a random local port pointing at backend
-// and returns its listen address.
-func startProxy(t *testing.T, backend string) string {
+func startProxy(t *testing.T, backendAddr string) string {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = ln.Close() })
 
-	p := &proxy.Proxy{BackendAddr: backend}
-	go func() { _ = p.Serve(ln) }()
+	go (&proxy.Proxy{BackendAddr: backendAddr}).Serve(ln)
 	return ln.Addr().String()
 }
 
-func openDB(t *testing.T, addr string) *sql.DB {
+func openPGX(t *testing.T, addr string) *sql.DB {
 	t.Helper()
 	dsn := fmt.Sprintf("postgres://%s:%s@%s/%s?sslmode=disable",
-		testUser, testPass, addr, testDB)
+		pgUser, pgPassword, addr, pgDatabase)
 	db, err := sql.Open("pgx", dsn)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
 	return db
 }
 
-// TestProxyForwardsSelect1 is the smoke test: a real psql client connecting
-// through the proxy can complete a query against the real Postgres backend.
-// If this passes we know the bidirectional pipe is correct.
-func TestProxyForwardsSelect1(t *testing.T) {
-	backend := startBackend(t)
-	proxyAddr := startProxy(t, backend)
-
-	db := openDB(t, proxyAddr)
-
-	var n int
-	require.NoError(t, db.QueryRow("SELECT 1").Scan(&n))
-	require.Equal(t, 1, n)
-}
-
-// TestProxyHandlesParallelConnections proves the goroutine-per-connection model
-// works: many independent queries through the same proxy must not interfere.
-// This is the property that the later forking work depends on.
-func TestProxyHandlesParallelConnections(t *testing.T) {
-	backend := startBackend(t)
-	proxyAddr := startProxy(t, backend)
-
-	const N = 8
-	errs := make(chan error, N)
-	for i := 0; i < N; i++ {
-		i := i
-		go func() {
-			db := openDB(t, proxyAddr)
-			var got int
-			err := db.QueryRow("SELECT $1::int", i).Scan(&got)
-			if err == nil && got != i {
-				err = fmt.Errorf("got %d want %d", got, i)
-			}
-			errs <- err
-		}()
-	}
-	for i := 0; i < N; i++ {
-		require.NoError(t, <-errs)
-	}
-}
-
-// TestServeReturnsWhenListenerClosed pins the contract that Serve exits
-// cleanly when its listener is closed — the cleanup pattern tests rely on.
-func TestServeReturnsWhenListenerClosed(t *testing.T) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-
-	p := &proxy.Proxy{BackendAddr: "127.0.0.1:1"} // unused; never accept
-	done := make(chan error, 1)
-	go func() { done <- p.Serve(ln) }()
-
-	require.NoError(t, ln.Close())
-	select {
-	case err := <-done:
-		require.NoError(t, err)
-	case <-time.After(2 * time.Second):
-		t.Fatal("Serve did not return after listener close")
-	}
+// serveAsync runs Serve in a goroutine, returning a channel for the result.
+func serveAsync(p *proxy.Proxy, ln net.Listener) <-chan error {
+	out := make(chan error, 1)
+	go func() { out <- p.Serve(ln) }()
+	return out
 }

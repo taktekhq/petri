@@ -11,111 +11,124 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// envLookup returns a getenv-style function backed by a map.
-func envLookup(env map[string]string) func(string) string {
-	return func(k string) string { return env[k] }
-}
+// ---- loadConfig ----
 
-func TestLoadConfigDefaultsListenAddr(t *testing.T) {
-	cfg, err := loadConfig(envLookup(map[string]string{
-		"PETRI_BACKEND_ADDR": "postgres:5432",
-	}))
-	require.NoError(t, err)
+func TestLoadConfig_Defaults(t *testing.T) {
+	cfg := mustLoadConfig(t, env{"PETRI_BACKEND_ADDR": "postgres:5432"})
 	require.Equal(t, ":5432", cfg.ListenAddr)
 	require.Equal(t, "postgres:5432", cfg.BackendAddr)
 }
 
-func TestLoadConfigOverridesListenAddr(t *testing.T) {
-	cfg, err := loadConfig(envLookup(map[string]string{
+func TestLoadConfig_OverrideListenAddr(t *testing.T) {
+	cfg := mustLoadConfig(t, env{
 		"PETRI_LISTEN_ADDR":  "0.0.0.0:6543",
-		"PETRI_BACKEND_ADDR": "pg.local:5432",
-	}))
-	require.NoError(t, err)
+		"PETRI_BACKEND_ADDR": "pg:5432",
+	})
 	require.Equal(t, "0.0.0.0:6543", cfg.ListenAddr)
 }
 
-func TestLoadConfigRequiresBackend(t *testing.T) {
-	_, err := loadConfig(envLookup(nil))
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "PETRI_BACKEND_ADDR")
+func TestLoadConfig_BackendRequired(t *testing.T) {
+	_, err := loadConfig(env{}.lookup())
+	require.ErrorContains(t, err, "PETRI_BACKEND_ADDR")
 }
 
-// TestRunListenError surfaces listener errors without requiring a backend at
-// all — picking a port that's already bound forces Listen to fail.
-func TestRunListenError(t *testing.T) {
-	occupied, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	defer occupied.Close()
+// ---- run ----
 
-	env := map[string]string{
-		"PETRI_LISTEN_ADDR":  occupied.Addr().String(),
+func TestRun_FailsOnBusyListenAddr(t *testing.T) {
+	busy := bindAndHold(t)
+	err := run(env{
+		"PETRI_LISTEN_ADDR":  busy.Addr().String(),
 		"PETRI_BACKEND_ADDR": "127.0.0.1:1",
-	}
-	err = run(envLookup(env), io.Discard)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "listen")
+	}.lookup(), io.Discard)
+	require.ErrorContains(t, err, "listen")
 }
 
-// TestRunStartsProxy boots the full main entrypoint against a stub TCP backend
-// and confirms a connection through the listen addr is forwarded. We don't
-// need a real Postgres here — proxy_test already covers wire-level behavior.
-// This test guards the wiring inside run().
-func TestRunStartsProxy(t *testing.T) {
+func TestRun_ProxiesBytesEndToEnd(t *testing.T) {
 	backend := startEchoBackend(t)
+	listenAddr := pickFreeAddr(t)
 
-	listenLn, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	listenAddr := listenLn.Addr().String()
-	require.NoError(t, listenLn.Close()) // free the port for run() to bind
-
-	env := map[string]string{
+	logs := &bytes.Buffer{}
+	go run(env{
 		"PETRI_LISTEN_ADDR":  listenAddr,
 		"PETRI_BACKEND_ADDR": backend,
-	}
+	}.lookup(), logs)
+	waitForListening(t, logs)
 
-	var logs bytes.Buffer
-	done := make(chan error, 1)
-	go func() { done <- run(envLookup(env), &logs) }()
-
-	// Wait for the startup log line so we know the listener is bound.
-	require.Eventually(t, func() bool {
-		return strings.Contains(logs.String(), "petri listening")
-	}, 2*time.Second, 10*time.Millisecond)
-
-	conn, err := net.Dial("tcp", listenAddr)
-	require.NoError(t, err)
-	defer conn.Close()
-
-	_, err = conn.Write([]byte("hello"))
-	require.NoError(t, err)
-
-	buf := make([]byte, 5)
-	require.NoError(t, conn.SetReadDeadline(time.Now().Add(2*time.Second)))
-	_, err = io.ReadFull(conn, buf)
-	require.NoError(t, err)
-	require.Equal(t, "hello", string(buf))
+	requireEchoes(t, listenAddr, "hello")
 }
 
-// startEchoBackend launches a tiny TCP echo server on a random port. The
-// proxy's wire transparency makes it ideal for testing wiring without a real
-// Postgres dependency.
+// ---- helpers ----
+
+type env map[string]string
+
+func (e env) lookup() func(string) string { return func(k string) string { return e[k] } }
+
+func mustLoadConfig(t *testing.T, e env) config {
+	t.Helper()
+	cfg, err := loadConfig(e.lookup())
+	require.NoError(t, err)
+	return cfg
+}
+
+// bindAndHold takes a port and keeps it bound for the test's lifetime.
+func bindAndHold(t *testing.T) net.Listener {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ln.Close() })
+	return ln
+}
+
+// pickFreeAddr returns a host:port that's free right now. Race-prone in
+// principle, fine in practice for local tests.
+func pickFreeAddr(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	addr := ln.Addr().String()
+	require.NoError(t, ln.Close())
+	return addr
+}
+
 func startEchoBackend(t *testing.T) string {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = ln.Close() })
 
-	go func() {
-		for {
-			c, err := ln.Accept()
-			if err != nil {
-				return
-			}
-			go func(c net.Conn) {
-				defer c.Close()
-				_, _ = io.Copy(c, c)
-			}(c)
-		}
-	}()
+	go acceptAndEcho(ln)
 	return ln.Addr().String()
+}
+
+func acceptAndEcho(ln net.Listener) {
+	for {
+		c, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		go func(c net.Conn) { defer c.Close(); io.Copy(c, c) }(c)
+	}
+}
+
+func waitForListening(t *testing.T, logs *bytes.Buffer) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		return strings.Contains(logs.String(), "petri listening")
+	}, 2*time.Second, 10*time.Millisecond)
+}
+
+func requireEchoes(t *testing.T, addr, msg string) {
+	t.Helper()
+	conn, err := net.Dial("tcp", addr)
+	require.NoError(t, err)
+	defer conn.Close()
+
+	_, err = conn.Write([]byte(msg))
+	require.NoError(t, err)
+
+	require.NoError(t, conn.SetReadDeadline(time.Now().Add(2*time.Second)))
+	buf := make([]byte, len(msg))
+	_, err = io.ReadFull(conn, buf)
+	require.NoError(t, err)
+	require.Equal(t, msg, string(buf))
 }
