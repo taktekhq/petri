@@ -7,7 +7,7 @@ export const newDB = (): Knex =>
   knex({
     client: 'pg',
     connection: {
-      host: process.env.PGHOST ?? 'postgres',
+      host: process.env.PGHOST ?? 'localhost',
       port: Number(process.env.PGPORT ?? 5432),
       user: 'appuser',
       password: 'apppass',

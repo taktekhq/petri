@@ -8,7 +8,7 @@ petri fork.
 ## Layout
 
 ```
-docker-compose.yml             # petri:postgres on :5432 + :5433
+docker-compose.yml             # one service, the petri image
 src/
   db.ts                        # newDB() — single source of truth
   crud.ts                      # crud(table, fields) → router factory
@@ -29,13 +29,16 @@ test/
 ## Run it
 
 ```bash
-docker build -t petri:postgres ../..   # one-time
 docker compose up -d
 bun install
 bun run migrate                         # PGPORT=5432, populates template
 bun test                                # PGPORT=5433, fork per test
 bun run start                           # http://localhost:3000
 ```
+
+The compose file pulls `ghcr.io/taktekhq/petri:0.1-alpha`. To build
+locally instead, swap the commented `image:` line for the active one
+and run `docker build -t petri:postgres ../..` first.
 
 ## How parallel isolation works
 
