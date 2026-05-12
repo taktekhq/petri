@@ -8,8 +8,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgproto3"
 	"github.com/stretchr/testify/require"
 )
+
+const protocolV3 = 196608
 
 // ---- loadConfig ----
 
@@ -43,18 +46,37 @@ func TestRun_FailsOnBusyListenAddr(t *testing.T) {
 	require.ErrorContains(t, err, "listen")
 }
 
-func TestRun_ProxiesBytesEndToEnd(t *testing.T) {
-	backend := startEchoBackend(t)
+func TestRun_StartsListenerAndLogsAddress(t *testing.T) {
 	listenAddr := pickFreeAddr(t)
+	logs := &bytes.Buffer{}
+	go run(env{
+		"PETRI_LISTEN_ADDR":  listenAddr,
+		"PETRI_BACKEND_ADDR": "127.0.0.1:1",
+	}.lookup(), logs)
 
+	waitForLog(t, logs, "petri listening")
+
+	conn, err := net.Dial("tcp", listenAddr)
+	require.NoError(t, err)
+	require.NoError(t, conn.Close())
+}
+
+// TestRun_LogsClientConnectionsByAppName exercises the OnStartup hook wired
+// up in main: a client sends a StartupMessage with application_name=… and
+// the log line records it. No real Postgres needed.
+func TestRun_LogsClientConnectionsByAppName(t *testing.T) {
+	backend := startStubBackend(t)
+	listenAddr := pickFreeAddr(t)
 	logs := &bytes.Buffer{}
 	go run(env{
 		"PETRI_LISTEN_ADDR":  listenAddr,
 		"PETRI_BACKEND_ADDR": backend,
 	}.lookup(), logs)
-	waitForListening(t, logs)
+	waitForLog(t, logs, "petri listening")
 
-	requireEchoes(t, listenAddr, "hello")
+	sendStartupAndDisconnect(t, listenAddr, "my-test-app")
+
+	waitForLog(t, logs, `app="my-test-app"`)
 }
 
 // ---- helpers ----
@@ -90,45 +112,52 @@ func pickFreeAddr(t *testing.T) string {
 	return addr
 }
 
-func startEchoBackend(t *testing.T) string {
+// startStubBackend accepts connections and silently drops every byte —
+// enough to keep the proxy's per-connection goroutine alive without speaking
+// the real Postgres protocol.
+func startStubBackend(t *testing.T) string {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = ln.Close() })
 
-	go acceptAndEcho(ln)
+	go acceptAndDiscard(ln)
 	return ln.Addr().String()
 }
 
-func acceptAndEcho(ln net.Listener) {
+func acceptAndDiscard(ln net.Listener) {
 	for {
 		c, err := ln.Accept()
 		if err != nil {
 			return
 		}
-		go func(c net.Conn) { defer c.Close(); io.Copy(c, c) }(c)
+		go func(c net.Conn) { defer c.Close(); io.Copy(io.Discard, c) }(c)
 	}
 }
 
-func waitForListening(t *testing.T, logs *bytes.Buffer) {
-	t.Helper()
-	require.Eventually(t, func() bool {
-		return strings.Contains(logs.String(), "petri listening")
-	}, 2*time.Second, 10*time.Millisecond)
-}
-
-func requireEchoes(t *testing.T, addr, msg string) {
+// sendStartupAndDisconnect sends a single StartupMessage with the given
+// application_name, then closes — just enough to trigger the OnStartup hook.
+func sendStartupAndDisconnect(t *testing.T, addr, appName string) {
 	t.Helper()
 	conn, err := net.Dial("tcp", addr)
 	require.NoError(t, err)
 	defer conn.Close()
 
-	_, err = conn.Write([]byte(msg))
-	require.NoError(t, err)
+	fe := pgproto3.NewFrontend(conn, conn)
+	fe.Send(&pgproto3.StartupMessage{
+		ProtocolVersion: protocolV3,
+		Parameters: map[string]string{
+			"user":             "alice",
+			"database":         "anything",
+			"application_name": appName,
+		},
+	})
+	require.NoError(t, fe.Flush())
+}
 
-	require.NoError(t, conn.SetReadDeadline(time.Now().Add(2*time.Second)))
-	buf := make([]byte, len(msg))
-	_, err = io.ReadFull(conn, buf)
-	require.NoError(t, err)
-	require.Equal(t, msg, string(buf))
+func waitForLog(t *testing.T, logs *bytes.Buffer, substr string) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		return strings.Contains(logs.String(), substr)
+	}, 2*time.Second, 10*time.Millisecond, "waiting for log line containing %q", substr)
 }

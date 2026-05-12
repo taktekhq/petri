@@ -14,7 +14,8 @@ import (
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
 	"github.com/testcontainers/testcontainers-go/wait"
 
-	"github.com/taktekhq/petri/proxy"
+	"github.com/taktekhq/petri/internal/proxy"
+	"github.com/taktekhq/petri/internal/startup"
 )
 
 const (
@@ -26,8 +27,8 @@ const (
 // TestProxy_SelectOne is the wire-level smoke test: a real pgx client through
 // the proxy can complete a query against real Postgres.
 func TestProxy_SelectOne(t *testing.T) {
-	addr := startProxyToPostgres(t)
-	db := openPGX(t, addr)
+	addr := startProxyToPostgres(t, nil)
+	db := openPGX(t, addr, "")
 
 	var n int
 	require.NoError(t, db.QueryRow("SELECT 1").Scan(&n))
@@ -37,18 +38,36 @@ func TestProxy_SelectOne(t *testing.T) {
 // TestProxy_ParallelConnections proves connections don't interfere — the
 // foundation that the forking work depends on.
 func TestProxy_ParallelConnections(t *testing.T) {
-	addr := startProxyToPostgres(t)
+	addr := startProxyToPostgres(t, nil)
 
 	for i := 0; i < 8; i++ {
 		i := i
 		t.Run(fmt.Sprintf("conn-%d", i), func(t *testing.T) {
 			t.Parallel()
-			db := openPGX(t, addr)
+			db := openPGX(t, addr, "")
 			var got int
 			require.NoError(t, db.QueryRow("SELECT $1::int", i).Scan(&got))
 			require.Equal(t, i, got)
 		})
 	}
+}
+
+// TestProxy_OnStartup_CapturesApplicationName is Phase 2's headline test:
+// a real pgx client connects with application_name=… and the hook sees it.
+func TestProxy_OnStartup_CapturesApplicationName(t *testing.T) {
+	var captured *startup.Info
+	addr := startProxyToPostgres(t, func(i *startup.Info) error {
+		captured = i
+		return nil
+	})
+
+	db := openPGX(t, addr, "my-test-app")
+	require.NoError(t, db.Ping())
+
+	require.NotNil(t, captured, "OnStartup hook was never invoked")
+	require.Equal(t, "my-test-app", captured.ApplicationName)
+	require.Equal(t, pgDatabase, captured.Database)
+	require.Equal(t, pgUser, captured.User)
 }
 
 // TestProxy_ServeReturnsOnListenerClose pins the shutdown contract that test
@@ -70,12 +89,14 @@ func TestProxy_ServeReturnsOnListenerClose(t *testing.T) {
 
 // ---- helpers ----
 
-// startProxyToPostgres boots a fresh Postgres + proxy pair and returns the
-// proxy's listen address. One call per test keeps the data isolated.
-func startProxyToPostgres(t *testing.T) string {
+// startProxyToPostgres boots a fresh Postgres + proxy pair, attaches an
+// optional OnStartup hook, and returns the proxy's listen address.
+func startProxyToPostgres(t *testing.T, onStartup func(*startup.Info) error) string {
 	t.Helper()
-	backend := startPostgres(t)
-	return startProxy(t, backend)
+	return serveProxy(t, &proxy.Proxy{
+		BackendAddr: startPostgres(t),
+		OnStartup:   onStartup,
+	})
 }
 
 func startPostgres(t *testing.T) string {
@@ -103,20 +124,25 @@ func startPostgres(t *testing.T) string {
 	return net.JoinHostPort(host, port.Port())
 }
 
-func startProxy(t *testing.T, backendAddr string) string {
+func serveProxy(t *testing.T, p *proxy.Proxy) string {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = ln.Close() })
 
-	go (&proxy.Proxy{BackendAddr: backendAddr}).Serve(ln)
+	go p.Serve(ln)
 	return ln.Addr().String()
 }
 
-func openPGX(t *testing.T, addr string) *sql.DB {
+// openPGX opens a database/sql handle through the proxy. appName, if non-empty,
+// sets the application_name connection parameter.
+func openPGX(t *testing.T, addr, appName string) *sql.DB {
 	t.Helper()
 	dsn := fmt.Sprintf("postgres://%s:%s@%s/%s?sslmode=disable",
 		pgUser, pgPassword, addr, pgDatabase)
+	if appName != "" {
+		dsn += "&application_name=" + appName
+	}
 	db, err := sql.Open("pgx", dsn)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })

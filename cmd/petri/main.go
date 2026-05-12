@@ -9,7 +9,8 @@ import (
 	"net"
 	"os"
 
-	"github.com/taktekhq/petri/proxy"
+	"github.com/taktekhq/petri/internal/proxy"
+	"github.com/taktekhq/petri/internal/startup"
 )
 
 func main() {
@@ -51,6 +52,18 @@ func run(getenv func(string) string, logs io.Writer) error {
 	}
 	fmt.Fprintf(logs, "petri listening on %s, forwarding to %s\n", ln.Addr(), cfg.BackendAddr)
 
-	p := &proxy.Proxy{BackendAddr: cfg.BackendAddr}
+	p := &proxy.Proxy{
+		BackendAddr: cfg.BackendAddr,
+		OnStartup:   logConnections(logs),
+	}
 	return p.Serve(ln)
+}
+
+// logConnections returns an OnStartup hook that prints one line per client.
+func logConnections(logs io.Writer) func(*startup.Info) error {
+	return func(i *startup.Info) error {
+		fmt.Fprintf(logs, "client connected: app=%q db=%q user=%q\n",
+			i.ApplicationName, i.Database, i.User)
+		return nil
+	}
 }
