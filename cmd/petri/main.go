@@ -74,7 +74,7 @@ func run(getenv func(string) string, logs io.Writer) error {
 
 // buildOnStartup picks the right hook based on config: a forking hook when
 // PETRI_ADMIN_DSN is set, a logging-only hook otherwise.
-func buildOnStartup(cfg config, logs io.Writer) func(*startup.Info) error {
+func buildOnStartup(cfg config, logs io.Writer) func(*startup.Info) (func(), error) {
 	if cfg.AdminDSN == "" {
 		return logConnections(logs)
 	}
@@ -85,30 +85,49 @@ func buildOnStartup(cfg config, logs io.Writer) func(*startup.Info) error {
 // fake without spinning up a real Postgres.
 type forkerAPI interface {
 	Fork(ctx context.Context, templateName, forkName string) error
+	Drop(ctx context.Context, forkName string) error
 }
 
 // forkPerConnection returns an OnStartup hook that gives every client its own
 // freshly-forked database. The fork name and application_name are both
 // rewritten to a UUID so the connection is fully isolated and traceable.
-func forkPerConnection(f forkerAPI, logs io.Writer) func(*startup.Info) error {
-	return func(i *startup.Info) error {
+// The returned cleanup drops the fork when the client disconnects.
+func forkPerConnection(f forkerAPI, logs io.Writer) func(*startup.Info) (func(), error) {
+	return func(i *startup.Info) (func(), error) {
 		template := i.Database
 		forkName := newForkName()
 
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-
-		if err := f.Fork(ctx, template, forkName); err != nil {
+		if err := withTimeout(func(ctx context.Context) error {
+			return f.Fork(ctx, template, forkName)
+		}); err != nil {
 			fmt.Fprintf(logs, "fork failed (template=%q): %v\n", template, err)
-			return err
+			return nil, err
 		}
 		fmt.Fprintf(logs, "forked %q -> %q (client app=%q user=%q)\n",
 			template, forkName, i.ApplicationName, i.User)
 
 		i.Database = forkName
 		i.ApplicationName = forkName
-		return nil
+
+		cleanup := func() {
+			if err := withTimeout(func(ctx context.Context) error {
+				return f.Drop(ctx, forkName)
+			}); err != nil {
+				fmt.Fprintf(logs, "drop fork %q failed: %v\n", forkName, err)
+				return
+			}
+			fmt.Fprintf(logs, "dropped fork %q\n", forkName)
+		}
+		return cleanup, nil
 	}
+}
+
+// withTimeout runs fn against a fresh 30s context — short enough to bound
+// admin operations, long enough for slow CREATE DATABASE on big templates.
+func withTimeout(fn func(context.Context) error) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	return fn(ctx)
 }
 
 // newForkName returns a Postgres-safe identifier built from a UUID.
@@ -118,10 +137,11 @@ func newForkName() string {
 }
 
 // logConnections is the Phase-2 hook: just print one line per client.
-func logConnections(logs io.Writer) func(*startup.Info) error {
-	return func(i *startup.Info) error {
+// No cleanup needed — there's nothing to undo.
+func logConnections(logs io.Writer) func(*startup.Info) (func(), error) {
+	return func(i *startup.Info) (func(), error) {
 		fmt.Fprintf(logs, "client connected: app=%q db=%q user=%q\n",
 			i.ApplicationName, i.Database, i.User)
-		return nil
+		return nil, nil
 	}
 }

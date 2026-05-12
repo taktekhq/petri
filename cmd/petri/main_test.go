@@ -90,31 +90,48 @@ func TestForkPerConnection_MutatesDatabaseAndAppName(t *testing.T) {
 	hook := forkPerConnection(f, io.Discard)
 
 	info := &startup.Info{Database: "appdb", User: "alice", ApplicationName: "old"}
-	require.NoError(t, hook(info))
+	cleanup, err := hook(info)
+	require.NoError(t, err)
+	require.NotNil(t, cleanup)
 
-	require.Len(t, f.calls, 1)
-	require.Equal(t, "appdb", f.calls[0].template)
-	require.True(t, strings.HasPrefix(f.calls[0].forkName, "petri_"), "fork name should be petri_<hex>")
-	require.Equal(t, f.calls[0].forkName, info.Database, "database should be rewritten to the fork")
+	require.Len(t, f.forks, 1)
+	require.Equal(t, "appdb", f.forks[0].template)
+	require.True(t, strings.HasPrefix(f.forks[0].forkName, "petri_"), "fork name should be petri_<hex>")
+	require.Equal(t, f.forks[0].forkName, info.Database, "database should be rewritten to the fork")
 	require.Equal(t, info.Database, info.ApplicationName, "application_name should equal the new database")
 	require.Equal(t, "alice", info.User, "user must not change")
 }
 
-func TestForkPerConnection_PropagatesForkError(t *testing.T) {
-	f := &fakeForker{err: errors.New("boom")}
+func TestForkPerConnection_CleanupDropsTheFork(t *testing.T) {
+	f := &fakeForker{}
 	hook := forkPerConnection(f, io.Discard)
 
-	err := hook(&startup.Info{Database: "appdb"})
+	cleanup, err := hook(&startup.Info{Database: "appdb"})
+	require.NoError(t, err)
+	require.Empty(t, f.drops, "Drop should not run until cleanup is called")
+
+	cleanup()
+	require.Equal(t, []string{f.forks[0].forkName}, f.drops)
+}
+
+func TestForkPerConnection_PropagatesForkError(t *testing.T) {
+	f := &fakeForker{forkErr: errors.New("boom")}
+	hook := forkPerConnection(f, io.Discard)
+
+	cleanup, err := hook(&startup.Info{Database: "appdb"})
 	require.ErrorContains(t, err, "boom")
+	require.Nil(t, cleanup, "no cleanup should be returned when fork fails")
 }
 
 func TestForkPerConnection_GeneratesUniqueNames(t *testing.T) {
 	f := &fakeForker{}
 	hook := forkPerConnection(f, io.Discard)
 
-	require.NoError(t, hook(&startup.Info{Database: "appdb"}))
-	require.NoError(t, hook(&startup.Info{Database: "appdb"}))
-	require.NotEqual(t, f.calls[0].forkName, f.calls[1].forkName)
+	_, err := hook(&startup.Info{Database: "appdb"})
+	require.NoError(t, err)
+	_, err = hook(&startup.Info{Database: "appdb"})
+	require.NoError(t, err)
+	require.NotEqual(t, f.forks[0].forkName, f.forks[1].forkName)
 }
 
 // ---- buildOnStartup ----
@@ -123,18 +140,22 @@ func TestBuildOnStartup_NoAdminDSN_LogsOnly(t *testing.T) {
 	logs := &bytes.Buffer{}
 	hook := buildOnStartup(config{}, logs)
 
-	require.NoError(t, hook(&startup.Info{Database: "appdb", User: "alice", ApplicationName: "x"}))
+	cleanup, err := hook(&startup.Info{Database: "appdb", User: "alice", ApplicationName: "x"})
+	require.NoError(t, err)
+	require.Nil(t, cleanup, "logging hook has no cleanup")
 	require.Contains(t, logs.String(), `client connected`)
 	require.Contains(t, logs.String(), `app="x"`)
 }
 
 // ---- helpers ----
 
-// fakeForker records the calls made to it for assertions. It lives next to
-// the test that owns it so the production interface stays minimal.
+// fakeForker records calls for assertions. It lives next to the test that
+// owns it so the production interface stays minimal.
 type fakeForker struct {
-	calls []fakeForkCall
-	err   error
+	forks   []fakeForkCall
+	drops   []string
+	forkErr error
+	dropErr error
 }
 
 type fakeForkCall struct {
@@ -143,8 +164,13 @@ type fakeForkCall struct {
 }
 
 func (f *fakeForker) Fork(_ context.Context, template, forkName string) error {
-	f.calls = append(f.calls, fakeForkCall{template: template, forkName: forkName})
-	return f.err
+	f.forks = append(f.forks, fakeForkCall{template: template, forkName: forkName})
+	return f.forkErr
+}
+
+func (f *fakeForker) Drop(_ context.Context, forkName string) error {
+	f.drops = append(f.drops, forkName)
+	return f.dropErr
 }
 
 

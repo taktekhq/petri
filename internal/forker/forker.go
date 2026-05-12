@@ -42,8 +42,10 @@ func (f *Forker) Fork(ctx context.Context, templateName, forkName string) error 
 	return nil
 }
 
-// Drop deletes a fork database. Used for cleanup; idempotent on
-// already-gone databases via IF EXISTS.
+// Drop deletes a fork database. Idempotent on already-gone databases via
+// IF EXISTS. Stale connections to the fork (e.g., the proxy's just-closed
+// backend session) are terminated first so the DROP doesn't lose to a race
+// with Postgres's own cleanup.
 func (f *Forker) Drop(ctx context.Context, forkName string) error {
 	conn, err := pgx.Connect(ctx, f.AdminDSN)
 	if err != nil {
@@ -51,9 +53,27 @@ func (f *Forker) Drop(ctx context.Context, forkName string) error {
 	}
 	defer conn.Close(ctx)
 
+	if err := terminateConnectionsTo(ctx, conn, forkName); err != nil {
+		return err
+	}
+
 	stmt := fmt.Sprintf(`DROP DATABASE IF EXISTS %s`, quoteIdent(forkName))
 	if _, err := conn.Exec(ctx, stmt); err != nil {
 		return fmt.Errorf("drop database %q: %w", forkName, err)
+	}
+	return nil
+}
+
+// terminateConnectionsTo evicts every backend currently attached to dbName
+// other than our own. Best-effort: a failure here is reported but we still
+// try the DROP — typically nothing was attached anyway.
+func terminateConnectionsTo(ctx context.Context, conn *pgx.Conn, dbName string) error {
+	_, err := conn.Exec(ctx, `
+		SELECT pg_terminate_backend(pid)
+		FROM pg_stat_activity
+		WHERE datname = $1 AND pid != pg_backend_pid()`, dbName)
+	if err != nil {
+		return fmt.Errorf("terminate connections to %q: %w", dbName, err)
 	}
 	return nil
 }

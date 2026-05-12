@@ -59,9 +59,9 @@ func TestProxy_ParallelConnections(t *testing.T) {
 // a real pgx client connects with application_name=… and the hook sees it.
 func TestProxy_OnStartup_CapturesApplicationName(t *testing.T) {
 	var captured *startup.Info
-	addr := startProxyToPostgres(t, func(i *startup.Info) error {
+	addr := startProxyToPostgres(t, func(i *startup.Info) (func(), error) {
 		captured = i
-		return nil
+		return nil, nil
 	})
 
 	db := openPGX(t, addr, "my-test-app")
@@ -98,6 +98,33 @@ func TestProxy_ForksDatabasePerConnection(t *testing.T) {
 	require.Equal(t, 2, scanInt(t, b, "SELECT id FROM t"))
 }
 
+// TestProxy_DropsForkOnDisconnect pins Phase 4's contract: after the client
+// closes its connection, the cleanup function fires and the fork is gone.
+func TestProxy_DropsForkOnDisconnect(t *testing.T) {
+	backendAddr := startPostgres(t)
+	f := &forker.Forker{AdminDSN: adminDSN(backendAddr)}
+	proxyAddr := serveProxy(t, &proxy.Proxy{
+		BackendAddr: backendAddr,
+		OnStartup:   forkIntoUUID(f),
+	})
+
+	// Connect through the proxy and ask which database we landed on — that's
+	// the fork name petri assigned.
+	client := openPGX(t, proxyAddr, "")
+	var assigned string
+	require.NoError(t, client.QueryRow("SELECT current_database()").Scan(&assigned))
+	require.True(t, strings.HasPrefix(assigned, "petri_"), "expected petri_ prefix, got %q", assigned)
+
+	admin := openSQLDirect(t, backendAddr, "postgres")
+	require.True(t, databaseExists(t, admin, assigned), "fork should exist while connection is open")
+
+	require.NoError(t, client.Close())
+
+	require.Eventually(t, func() bool {
+		return !databaseExists(t, admin, assigned)
+	}, 5*time.Second, 100*time.Millisecond, "fork %q was not dropped after disconnect", assigned)
+}
+
 // TestProxy_ServeReturnsOnListenerClose pins the shutdown contract that test
 // cleanup and `main` rely on.
 func TestProxy_ServeReturnsOnListenerClose(t *testing.T) {
@@ -119,7 +146,7 @@ func TestProxy_ServeReturnsOnListenerClose(t *testing.T) {
 
 // startProxyToPostgres boots a fresh Postgres + proxy pair, attaches an
 // optional OnStartup hook, and returns the proxy's listen address.
-func startProxyToPostgres(t *testing.T, onStartup func(*startup.Info) error) string {
+func startProxyToPostgres(t *testing.T, onStartup func(*startup.Info) (func(), error)) string {
 	t.Helper()
 	return serveProxy(t, &proxy.Proxy{
 		BackendAddr: startPostgres(t),
@@ -191,19 +218,26 @@ func adminDSN(addr string) string {
 		pgUser, pgPassword, addr)
 }
 
-// forkIntoUUID is the minimal Phase 3 OnStartup hook: every client lands on
-// a freshly-forked copy of their requested database, named by a UUID.
-func forkIntoUUID(f *forker.Forker) func(*startup.Info) error {
-	return func(i *startup.Info) error {
+// forkIntoUUID is the minimal OnStartup hook used by integration tests:
+// every client lands on a freshly-forked copy of their requested database,
+// named by a UUID, and the fork is dropped when the client disconnects.
+func forkIntoUUID(f *forker.Forker) func(*startup.Info) (func(), error) {
+	return func(i *startup.Info) (func(), error) {
 		name := "petri_" + strings.ReplaceAll(uuid.NewString(), "-", "")
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		if err := f.Fork(ctx, i.Database, name); err != nil {
-			return err
+			return nil, err
 		}
 		i.Database = name
 		i.ApplicationName = name
-		return nil
+
+		cleanup := func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			_ = f.Drop(ctx, name)
+		}
+		return cleanup, nil
 	}
 }
 
@@ -218,4 +252,27 @@ func scanInt(t *testing.T, db *sql.DB, q string) int {
 	var n int
 	require.NoError(t, db.QueryRow(q).Scan(&n))
 	return n
+}
+
+// openSQLDirect opens a database/sql handle that bypasses the proxy and goes
+// straight to Postgres on the given database. Used by tests that need to
+// observe pg_database without disturbing the system under test.
+func openSQLDirect(t *testing.T, addr, db string) *sql.DB {
+	t.Helper()
+	dsn := fmt.Sprintf("postgres://%s:%s@%s/%s?sslmode=disable",
+		pgUser, pgPassword, addr, db)
+	d, err := sql.Open("pgx", dsn)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = d.Close() })
+	return d
+}
+
+// databaseExists returns true if `name` appears in pg_database.
+func databaseExists(t *testing.T, admin *sql.DB, name string) bool {
+	t.Helper()
+	var exists bool
+	require.NoError(t, admin.QueryRow(
+		`SELECT EXISTS(SELECT 1 FROM pg_database WHERE datname = $1)`, name,
+	).Scan(&exists))
+	return exists
 }
