@@ -35,7 +35,7 @@ const (
 // the bundled binary is wrong: a single client must be able to query.
 func TestImage_SmokeSelectOne(t *testing.T) {
 	skipIfShort(t)
-	addr := startPetriImage(t)
+	addr := startPetriImage(t, "")
 
 	db := openPGX(t, addr, "")
 	var n int
@@ -48,7 +48,7 @@ func TestImage_SmokeSelectOne(t *testing.T) {
 // land on independent forks and can't see each other's writes.
 func TestImage_IsolatesConnections(t *testing.T) {
 	skipIfShort(t)
-	addr := startPetriImage(t)
+	addr := startPetriImage(t, "")
 
 	a := openPGX(t, addr, "client-a")
 	b := openPGX(t, addr, "client-b")
@@ -67,7 +67,7 @@ func TestImage_IsolatesConnections(t *testing.T) {
 // pg_database soon after.
 func TestImage_DropsForkOnDisconnect(t *testing.T) {
 	skipIfShort(t)
-	addr := startPetriImage(t)
+	addr := startPetriImage(t, "")
 
 	a := openPGX(t, addr, "")
 	var aFork string
@@ -87,8 +87,11 @@ func TestImage_DropsForkOnDisconnect(t *testing.T) {
 // ---- helpers ----
 
 // startPetriImage builds the image (cached after first run) and starts a
-// container, returning the host:port reachable from the test process.
-func startPetriImage(t *testing.T) string {
+// container, returning the host:port reachable from the test process. If
+// initSQL is non-empty it is written into /docker-entrypoint-initdb.d/ so
+// Postgres runs it once during init — the schema/seed lands on the template
+// database that subsequent forks copy from.
+func startPetriImage(t *testing.T, initSQL string) string {
 	t.Helper()
 	ctx := context.Background()
 
@@ -107,6 +110,13 @@ func startPetriImage(t *testing.T) string {
 			"POSTGRES_DB":       pgDatabase,
 		},
 		WaitingFor: wait.ForLog("petri listening").WithStartupTimeout(2 * time.Minute),
+	}
+	if initSQL != "" {
+		req.Files = append(req.Files, testcontainers.ContainerFile{
+			Reader:            strings.NewReader(initSQL),
+			ContainerFilePath: "/docker-entrypoint-initdb.d/01-seed.sql",
+			FileMode:          0o644,
+		})
 	}
 
 	c, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{

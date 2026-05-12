@@ -1,11 +1,15 @@
 # Build the petri binary statically against musl so it runs unmodified inside
 # the postgres:alpine image. CGO_ENABLED=0 means no glibc dependency.
-# Deps are vendored so the build is fully offline — useful for restricted
-# networks and for keeping the image reproducible without an extra fetch step.
+#
+# `go build` auto-uses ./vendor/ if it's present in the build context (Go
+# >=1.14 behaviour). That's a handy escape hatch for restricted networks —
+# pre-run `go mod vendor` and the build is fully offline — but the common
+# path fetches modules from the configured proxy on demand. No env var or
+# flag toggle either way.
 FROM golang:1.25-alpine AS build
 WORKDIR /src
 COPY . .
-RUN CGO_ENABLED=0 go build -trimpath -mod=vendor -o /out/petri ./cmd/petri
+RUN CGO_ENABLED=0 go build -trimpath -o /out/petri ./cmd/petri
 
 # Bundle petri with Postgres in a single image. Users replace
 # `image: postgres:16` with `image: petri:postgres` in their compose file

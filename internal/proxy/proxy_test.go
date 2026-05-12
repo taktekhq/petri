@@ -79,11 +79,10 @@ func TestProxy_OnStartup_CapturesApplicationName(t *testing.T) {
 // tables. They can even create the same table name without conflict.
 func TestProxy_ForksDatabasePerConnection(t *testing.T) {
 	backendAddr := startPostgres(t)
-	f := &forker.Forker{AdminDSN: adminDSN(backendAddr)}
 
 	proxyAddr := serveProxy(t, &proxy.Proxy{
 		BackendAddr: backendAddr,
-		OnStartup:   forkIntoUUID(f),
+		OnStartup:   forkIntoUUID(adminDSN(backendAddr)),
 	})
 
 	a := openPGX(t, proxyAddr, "client-a")
@@ -102,10 +101,9 @@ func TestProxy_ForksDatabasePerConnection(t *testing.T) {
 // closes its connection, the cleanup function fires and the fork is gone.
 func TestProxy_DropsForkOnDisconnect(t *testing.T) {
 	backendAddr := startPostgres(t)
-	f := &forker.Forker{AdminDSN: adminDSN(backendAddr)}
 	proxyAddr := serveProxy(t, &proxy.Proxy{
 		BackendAddr: backendAddr,
-		OnStartup:   forkIntoUUID(f),
+		OnStartup:   forkIntoUUID(adminDSN(backendAddr)),
 	})
 
 	// Connect through the proxy and ask which database we landed on — that's
@@ -221,12 +219,13 @@ func adminDSN(addr string) string {
 // forkIntoUUID is the minimal OnStartup hook used by integration tests:
 // every client lands on a freshly-forked copy of their requested database,
 // named by a UUID, and the fork is dropped when the client disconnects.
-func forkIntoUUID(f *forker.Forker) func(*startup.Info) (func(), error) {
+func forkIntoUUID(dsn string) func(*startup.Info) (func(), error) {
+	f := forker.Forker{}
 	return func(i *startup.Info) (func(), error) {
 		name := "petri_" + strings.ReplaceAll(uuid.NewString(), "-", "")
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		if err := f.Fork(ctx, i.Database, name); err != nil {
+		if err := f.Fork(ctx, dsn, i.Database, name); err != nil {
 			return nil, err
 		}
 		i.Database = name
@@ -235,7 +234,7 @@ func forkIntoUUID(f *forker.Forker) func(*startup.Info) (func(), error) {
 		cleanup := func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
-			_ = f.Drop(ctx, name)
+			_ = f.Drop(ctx, dsn, name)
 		}
 		return cleanup, nil
 	}

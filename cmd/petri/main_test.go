@@ -10,53 +10,49 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgproto3"
 	"github.com/stretchr/testify/require"
 
 	"github.com/taktekhq/petri/internal/startup"
 )
 
-const protocolV3 = 196608
-
 // ---- loadConfig ----
 
 func TestLoadConfig_Defaults(t *testing.T) {
-	cfg := mustLoadConfig(t, env{"PETRI_BACKEND_ADDR": "postgres:5432"})
+	cfg := loadConfig(env{}.lookup())
 	require.Equal(t, ":5432", cfg.ListenAddr)
-	require.Equal(t, "postgres:5432", cfg.BackendAddr)
+	require.Equal(t, "5432", cfg.BackendPort)
+	require.Equal(t, "postgres", cfg.AdminUser)
+	require.Empty(t, cfg.AdminPassword)
 }
 
-func TestLoadConfig_OverrideListenAddr(t *testing.T) {
-	cfg := mustLoadConfig(t, env{
-		"PETRI_LISTEN_ADDR":  "0.0.0.0:6543",
-		"PETRI_BACKEND_ADDR": "pg:5432",
-	})
+func TestLoadConfig_ReadsPostgresEnvVars(t *testing.T) {
+	cfg := loadConfig(env{
+		"PGPORT":            "5433",
+		"POSTGRES_USER":     "adminbob",
+		"POSTGRES_PASSWORD": "s3cret",
+	}.lookup())
+	require.Equal(t, "5433", cfg.BackendPort)
+	require.Equal(t, "adminbob", cfg.AdminUser)
+	require.Equal(t, "s3cret", cfg.AdminPassword)
+}
+
+func TestLoadConfig_OverridesListenAddr(t *testing.T) {
+	cfg := loadConfig(env{"PETRI_LISTEN_ADDR": "0.0.0.0:6543"}.lookup())
 	require.Equal(t, "0.0.0.0:6543", cfg.ListenAddr)
-}
-
-func TestLoadConfig_BackendRequired(t *testing.T) {
-	_, err := loadConfig(env{}.lookup())
-	require.ErrorContains(t, err, "PETRI_BACKEND_ADDR")
 }
 
 // ---- run ----
 
 func TestRun_FailsOnBusyListenAddr(t *testing.T) {
 	busy := bindAndHold(t)
-	err := run(env{
-		"PETRI_LISTEN_ADDR":  busy.Addr().String(),
-		"PETRI_BACKEND_ADDR": "127.0.0.1:1",
-	}.lookup(), io.Discard)
+	err := run(env{"PETRI_LISTEN_ADDR": busy.Addr().String()}.lookup(), io.Discard)
 	require.ErrorContains(t, err, "listen")
 }
 
 func TestRun_StartsListenerAndLogsAddress(t *testing.T) {
 	listenAddr := pickFreeAddr(t)
 	logs := &bytes.Buffer{}
-	go run(env{
-		"PETRI_LISTEN_ADDR":  listenAddr,
-		"PETRI_BACKEND_ADDR": "127.0.0.1:1",
-	}.lookup(), logs)
+	go run(env{"PETRI_LISTEN_ADDR": listenAddr}.lookup(), logs)
 
 	waitForLog(t, logs, "petri listening")
 
@@ -65,29 +61,11 @@ func TestRun_StartsListenerAndLogsAddress(t *testing.T) {
 	require.NoError(t, conn.Close())
 }
 
-// TestRun_LogsClientConnectionsByAppName exercises the OnStartup hook wired
-// up in main: a client sends a StartupMessage with application_name=… and
-// the log line records it. No real Postgres needed.
-func TestRun_LogsClientConnectionsByAppName(t *testing.T) {
-	backend := startStubBackend(t)
-	listenAddr := pickFreeAddr(t)
-	logs := &bytes.Buffer{}
-	go run(env{
-		"PETRI_LISTEN_ADDR":  listenAddr,
-		"PETRI_BACKEND_ADDR": backend,
-	}.lookup(), logs)
-	waitForLog(t, logs, "petri listening")
-
-	sendStartupAndDisconnect(t, listenAddr, "my-test-app")
-
-	waitForLog(t, logs, `app="my-test-app"`)
-}
-
 // ---- forkPerConnection ----
 
 func TestForkPerConnection_MutatesDatabaseAndAppName(t *testing.T) {
 	f := &fakeForker{}
-	hook := forkPerConnection(f, io.Discard)
+	hook := forkPerConnection(testCfg(), f, io.Discard)
 
 	info := &startup.Info{Database: "appdb", User: "alice", ApplicationName: "old"}
 	cleanup, err := hook(info)
@@ -102,89 +80,99 @@ func TestForkPerConnection_MutatesDatabaseAndAppName(t *testing.T) {
 	require.Equal(t, "alice", info.User, "user must not change")
 }
 
-func TestForkPerConnection_CleanupDropsTheFork(t *testing.T) {
+// TestForkPerConnection_AdminDSNUsesEnvCreds pins the contract that proxy
+// DB work (Fork / Drop) authenticates as POSTGRES_USER + POSTGRES_PASSWORD —
+// NOT the client's user. This keeps forking working when the client is a
+// read-only role; the client's own queries still use their own credentials
+// via the bridge.
+func TestForkPerConnection_AdminDSNUsesEnvCreds(t *testing.T) {
 	f := &fakeForker{}
-	hook := forkPerConnection(f, io.Discard)
+	cfg := config{BackendPort: "5433", AdminUser: "adminbob", AdminPassword: "s3cret"}
+	hook := forkPerConnection(cfg, f, io.Discard)
 
-	cleanup, err := hook(&startup.Info{Database: "appdb"})
+	_, err := hook(&startup.Info{Database: "appdb", User: "readonly-alice"})
+	require.NoError(t, err)
+
+	dsn := f.forks[0].adminDSN
+	require.Contains(t, dsn, "adminbob", "admin DSN should authenticate as POSTGRES_USER")
+	require.Contains(t, dsn, "s3cret", "admin DSN should use POSTGRES_PASSWORD")
+	require.NotContains(t, dsn, "readonly-alice", "admin DSN must not use the client's user")
+	require.Contains(t, dsn, "127.0.0.1:5433", "admin DSN should target the backend on PGPORT")
+}
+
+func TestForkPerConnection_CleanupDropsTheForkWithSameDSN(t *testing.T) {
+	f := &fakeForker{}
+	hook := forkPerConnection(testCfg(), f, io.Discard)
+
+	cleanup, err := hook(&startup.Info{Database: "appdb", User: "alice"})
 	require.NoError(t, err)
 	require.Empty(t, f.drops, "Drop should not run until cleanup is called")
 
 	cleanup()
-	require.Equal(t, []string{f.forks[0].forkName}, f.drops)
+	require.Len(t, f.drops, 1)
+	require.Equal(t, f.forks[0].forkName, f.drops[0].forkName)
+	require.Equal(t, f.forks[0].adminDSN, f.drops[0].adminDSN, "Drop should reuse the Fork's DSN")
 }
 
 func TestForkPerConnection_PropagatesForkError(t *testing.T) {
 	f := &fakeForker{forkErr: errors.New("boom")}
-	hook := forkPerConnection(f, io.Discard)
+	hook := forkPerConnection(testCfg(), f, io.Discard)
 
-	cleanup, err := hook(&startup.Info{Database: "appdb"})
+	cleanup, err := hook(&startup.Info{Database: "appdb", User: "alice"})
 	require.ErrorContains(t, err, "boom")
 	require.Nil(t, cleanup, "no cleanup should be returned when fork fails")
 }
 
 func TestForkPerConnection_GeneratesUniqueNames(t *testing.T) {
 	f := &fakeForker{}
-	hook := forkPerConnection(f, io.Discard)
+	hook := forkPerConnection(testCfg(), f, io.Discard)
 
-	_, err := hook(&startup.Info{Database: "appdb"})
+	_, err := hook(&startup.Info{Database: "appdb", User: "alice"})
 	require.NoError(t, err)
-	_, err = hook(&startup.Info{Database: "appdb"})
+	_, err = hook(&startup.Info{Database: "appdb", User: "alice"})
 	require.NoError(t, err)
 	require.NotEqual(t, f.forks[0].forkName, f.forks[1].forkName)
 }
 
-// ---- buildOnStartup ----
-
-func TestBuildOnStartup_NoAdminDSN_LogsOnly(t *testing.T) {
-	logs := &bytes.Buffer{}
-	hook := buildOnStartup(config{}, logs)
-
-	cleanup, err := hook(&startup.Info{Database: "appdb", User: "alice", ApplicationName: "x"})
-	require.NoError(t, err)
-	require.Nil(t, cleanup, "logging hook has no cleanup")
-	require.Contains(t, logs.String(), `client connected`)
-	require.Contains(t, logs.String(), `app="x"`)
-}
-
 // ---- helpers ----
 
-// fakeForker records calls for assertions. It lives next to the test that
-// owns it so the production interface stays minimal.
+// fakeForker records calls for assertions. The captured adminDSN per call
+// lets tests verify that admin auth is built from the client's user.
 type fakeForker struct {
 	forks   []fakeForkCall
-	drops   []string
+	drops   []fakeDropCall
 	forkErr error
 	dropErr error
 }
 
 type fakeForkCall struct {
+	adminDSN string
 	template string
 	forkName string
 }
 
-func (f *fakeForker) Fork(_ context.Context, template, forkName string) error {
-	f.forks = append(f.forks, fakeForkCall{template: template, forkName: forkName})
+type fakeDropCall struct {
+	adminDSN string
+	forkName string
+}
+
+func (f *fakeForker) Fork(_ context.Context, adminDSN, template, forkName string) error {
+	f.forks = append(f.forks, fakeForkCall{adminDSN: adminDSN, template: template, forkName: forkName})
 	return f.forkErr
 }
 
-func (f *fakeForker) Drop(_ context.Context, forkName string) error {
-	f.drops = append(f.drops, forkName)
+func (f *fakeForker) Drop(_ context.Context, adminDSN, forkName string) error {
+	f.drops = append(f.drops, fakeDropCall{adminDSN: adminDSN, forkName: forkName})
 	return f.dropErr
 }
 
-
+func testCfg() config {
+	return config{BackendPort: "5432", AdminUser: "postgres", AdminPassword: "pw"}
+}
 
 type env map[string]string
 
 func (e env) lookup() func(string) string { return func(k string) string { return e[k] } }
-
-func mustLoadConfig(t *testing.T, e env) config {
-	t.Helper()
-	cfg, err := loadConfig(e.lookup())
-	require.NoError(t, err)
-	return cfg
-}
 
 // bindAndHold takes a port and keeps it bound for the test's lifetime.
 func bindAndHold(t *testing.T) net.Listener {
@@ -204,49 +192,6 @@ func pickFreeAddr(t *testing.T) string {
 	addr := ln.Addr().String()
 	require.NoError(t, ln.Close())
 	return addr
-}
-
-// startStubBackend accepts connections and silently drops every byte —
-// enough to keep the proxy's per-connection goroutine alive without speaking
-// the real Postgres protocol.
-func startStubBackend(t *testing.T) string {
-	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = ln.Close() })
-
-	go acceptAndDiscard(ln)
-	return ln.Addr().String()
-}
-
-func acceptAndDiscard(ln net.Listener) {
-	for {
-		c, err := ln.Accept()
-		if err != nil {
-			return
-		}
-		go func(c net.Conn) { defer c.Close(); io.Copy(io.Discard, c) }(c)
-	}
-}
-
-// sendStartupAndDisconnect sends a single StartupMessage with the given
-// application_name, then closes — just enough to trigger the OnStartup hook.
-func sendStartupAndDisconnect(t *testing.T, addr, appName string) {
-	t.Helper()
-	conn, err := net.Dial("tcp", addr)
-	require.NoError(t, err)
-	defer conn.Close()
-
-	fe := pgproto3.NewFrontend(conn, conn)
-	fe.Send(&pgproto3.StartupMessage{
-		ProtocolVersion: protocolV3,
-		Parameters: map[string]string{
-			"user":             "alice",
-			"database":         "anything",
-			"application_name": appName,
-		},
-	})
-	require.NoError(t, fe.Flush())
 }
 
 func waitForLog(t *testing.T, logs *bytes.Buffer, substr string) {

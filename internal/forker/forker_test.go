@@ -29,8 +29,8 @@ func TestForker_ForkCopiesTemplate(t *testing.T) {
 	pg := startPostgres(t)
 	seedTemplate(t, pg, "CREATE TABLE seeded (n int)", "INSERT INTO seeded VALUES (42)")
 
-	f := &forker.Forker{AdminDSN: pg.dsn("postgres")}
-	require.NoError(t, f.Fork(ctx(t), template, "fork_one"))
+	f := forker.Forker{}
+	require.NoError(t, f.Fork(ctx(t), pg.dsn("postgres"), template, "fork_one"))
 
 	var got int
 	require.NoError(t, openSQL(t, pg.dsn("fork_one")).
@@ -44,9 +44,9 @@ func TestForker_ForksAreIndependent(t *testing.T) {
 	pg := startPostgres(t)
 	seedTemplate(t, pg, "CREATE TABLE t (n int)")
 
-	f := &forker.Forker{AdminDSN: pg.dsn("postgres")}
-	require.NoError(t, f.Fork(ctx(t), template, "fork_a"))
-	require.NoError(t, f.Fork(ctx(t), template, "fork_b"))
+	f := forker.Forker{}
+	require.NoError(t, f.Fork(ctx(t), pg.dsn("postgres"), template, "fork_a"))
+	require.NoError(t, f.Fork(ctx(t), pg.dsn("postgres"), template, "fork_b"))
 
 	openSQL(t, pg.dsn("fork_a")).Exec("INSERT INTO t VALUES (1)")
 	openSQL(t, pg.dsn("fork_b")).Exec("INSERT INTO t VALUES (2)")
@@ -61,9 +61,9 @@ func TestForker_Drop(t *testing.T) {
 	pg := startPostgres(t)
 	seedTemplate(t, pg, "CREATE TABLE t (n int)")
 
-	f := &forker.Forker{AdminDSN: pg.dsn("postgres")}
-	require.NoError(t, f.Fork(ctx(t), template, "fork_to_drop"))
-	require.NoError(t, f.Drop(ctx(t), "fork_to_drop"))
+	f := forker.Forker{}
+	require.NoError(t, f.Fork(ctx(t), pg.dsn("postgres"), template, "fork_to_drop"))
+	require.NoError(t, f.Drop(ctx(t), pg.dsn("postgres"), "fork_to_drop"))
 
 	_, err := openSQL(t, pg.dsn("fork_to_drop")).Exec("SELECT 1")
 	require.ErrorContains(t, err, "does not exist")
@@ -72,8 +72,8 @@ func TestForker_Drop(t *testing.T) {
 // TestForker_DropIsIdempotent — calling Drop twice doesn't error.
 func TestForker_DropIsIdempotent(t *testing.T) {
 	pg := startPostgres(t)
-	f := &forker.Forker{AdminDSN: pg.dsn("postgres")}
-	require.NoError(t, f.Drop(ctx(t), "never_existed"))
+	f := forker.Forker{}
+	require.NoError(t, f.Drop(ctx(t), pg.dsn("postgres"), "never_existed"))
 }
 
 // ---- helpers ----

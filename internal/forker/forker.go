@@ -5,6 +5,12 @@
 // CREATE DATABASE … TEMPLATE …. This makes seeded databases nearly free to
 // duplicate and isolates each client's writes from the rest.
 //
+// Forker is stateless. Each call takes an admin DSN so callers can authenticate
+// as a per-connection user (typically the client's username from the proxied
+// startup message). That way auth and authorization failures surface as the
+// client's own error, not as a side effect of admin credentials they never
+// sent.
+//
 // File map:
 //   - forker.go       – Forker.Fork, Forker.Drop, identifier quoting
 //   - forker_test.go  – real Postgres in a testcontainer
@@ -18,17 +24,15 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// Forker creates and drops fork databases using a single admin connection
-// string. The AdminDSN must authenticate as a role that can CREATE DATABASE
-// (typically a superuser) and point at any database other than the template.
-type Forker struct {
-	AdminDSN string
-}
+// Forker creates and drops fork databases. The receiver is empty — it exists
+// so callers can substitute a fake via an interface.
+type Forker struct{}
 
-// Fork creates a new database `forkName` whose contents copy `templateName`.
-// The template must have no other open connections at the moment of fork.
-func (f *Forker) Fork(ctx context.Context, templateName, forkName string) error {
-	conn, err := pgx.Connect(ctx, f.AdminDSN)
+// Fork creates a new database `forkName` whose contents copy `templateName`,
+// connecting via adminDSN. The template must have no other open connections
+// at the moment of fork.
+func (Forker) Fork(ctx context.Context, adminDSN, templateName, forkName string) error {
+	conn, err := pgx.Connect(ctx, adminDSN)
 	if err != nil {
 		return fmt.Errorf("connect admin: %w", err)
 	}
@@ -42,12 +46,12 @@ func (f *Forker) Fork(ctx context.Context, templateName, forkName string) error 
 	return nil
 }
 
-// Drop deletes a fork database. Idempotent on already-gone databases via
-// IF EXISTS. Stale connections to the fork (e.g., the proxy's just-closed
-// backend session) are terminated first so the DROP doesn't lose to a race
-// with Postgres's own cleanup.
-func (f *Forker) Drop(ctx context.Context, forkName string) error {
-	conn, err := pgx.Connect(ctx, f.AdminDSN)
+// Drop deletes a fork database, connecting via adminDSN. Idempotent on
+// already-gone databases via IF EXISTS. Stale connections to the fork
+// (e.g., the proxy's just-closed backend session) are terminated first so
+// DROP doesn't lose to a race with Postgres's own cleanup.
+func (Forker) Drop(ctx context.Context, adminDSN, forkName string) error {
+	conn, err := pgx.Connect(ctx, adminDSN)
 	if err != nil {
 		return fmt.Errorf("connect admin: %w", err)
 	}
