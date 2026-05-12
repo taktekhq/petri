@@ -1,12 +1,18 @@
 name: Publish image
 
-# Builds petri and pushes it to GHCR. Triggers:
+# Builds the petri-postgres image and pushes it to GHCR. Triggers:
 #   - pushing a tag like v0.1-alpha, v1.2.3, etc.
 #   - manual dispatch from the Actions tab (lets you choose the tag).
 #
 # secrets.GITHUB_TOKEN is provided automatically by Actions — no setup
 # required beyond having "Read and write permissions" enabled under
 # Settings -> Actions -> General -> Workflow permissions.
+#
+# Image naming: each Postgres-backed variant publishes under
+# `ghcr.io/taktekhq/petri-postgres`, tagged with the backing Postgres
+# version + the petri version (e.g. `16.4-0.1-alpha`). When the MySQL
+# variant lands later it'll publish under `petri-mysql` on the same
+# scheme (e.g. `8.0-0.1-alpha`).
 
 on:
   push:
@@ -14,13 +20,16 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Image tag to publish (without leading v)'
+        description: 'petri version to publish (without leading v)'
         required: true
         default: '0.1-alpha'
 
 permissions:
   contents: read
   packages: write
+
+env:
+  POSTGRES_VERSION: '16.4'
 
 jobs:
   publish:
@@ -36,14 +45,15 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Resolve tag
+      - name: Resolve version tag
         id: tag
         run: |
           if [ -n "${{ inputs.tag }}" ]; then
-            echo "value=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+            PETRI_VERSION="${{ inputs.tag }}"
           else
-            echo "value=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+            PETRI_VERSION="${GITHUB_REF_NAME#v}"
           fi
+          echo "value=${POSTGRES_VERSION}-${PETRI_VERSION}" >> "$GITHUB_OUTPUT"
 
       - uses: docker/build-push-action@v6
         with:
@@ -51,5 +61,5 @@ jobs:
           push: true
           platforms: linux/amd64,linux/arm64
           tags: |
-            ghcr.io/taktekhq/petri:${{ steps.tag.outputs.value }}
-            ghcr.io/taktekhq/petri:latest
+            ghcr.io/taktekhq/petri-postgres:${{ steps.tag.outputs.value }}
+            ghcr.io/taktekhq/petri-postgres:latest
