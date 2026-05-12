@@ -12,10 +12,12 @@ COPY . .
 RUN CGO_ENABLED=0 go build -trimpath -o /out/petri ./cmd/petri
 
 # Bundle petri with Postgres in a single image. Users replace
-# `image: postgres:16` with `image: petri:postgres` in their compose file
-# and get isolated forked databases per client connection — no other
-# config required beyond the standard POSTGRES_USER/PASSWORD/DB env vars.
-FROM postgres:16-alpine
+# `image: postgres:16.4-alpine` with `image: petri:postgres` in compose, or
+# `FROM postgres:16.4-alpine` with `FROM petri:postgres` in their own
+# Dockerfile, and get isolated forked databases per client connection — no
+# other config required beyond the standard POSTGRES_USER/PASSWORD/DB env
+# vars. Pinned to 16.4 because that's the only Postgres version supported.
+FROM postgres:16.4-alpine
 COPY --from=build /out/petri /usr/local/bin/petri
 COPY docker/petri-entrypoint.sh /usr/local/bin/petri-entrypoint.sh
 RUN chmod +x /usr/local/bin/petri-entrypoint.sh

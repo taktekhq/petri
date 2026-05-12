@@ -157,7 +157,7 @@ func startPostgres(t *testing.T) string {
 	ctx := context.Background()
 
 	pg, err := postgres.Run(ctx,
-		"postgres:16-alpine",
+		"postgres:16.4-alpine",
 		postgres.WithDatabase(pgDatabase),
 		postgres.WithUsername(pgUser),
 		postgres.WithPassword(pgPassword),
