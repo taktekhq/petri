@@ -1,12 +1,7 @@
 // Package proxy forwards client connections to a single backend Postgres.
 //
-// Each client connection is walked through: read the startup message →
-// notify the OnStartup hook → dial the backend → replay the startup →
-// pipe bytes in both directions until either side closes.
-//
-// File map:
-//   - proxy.go   – Proxy type, Serve loop, per-connection orchestration
-//   - bridge.go  – the bidirectional byte pipe used after startup
+// Per connection: read startup → call OnStartup hook → dial backend → replay
+// startup → bridge bytes → run cleanup.
 package proxy
 
 import (
@@ -42,10 +37,6 @@ func (p *Proxy) Serve(ln net.Listener) error {
 	}
 }
 
-// handleClient walks one connection through: read startup → notify → dial
-// backend → bridge → run cleanup. cleanup runs whether the client
-// disconnected cleanly or the backend died, so per-connection resources
-// (e.g. forks) get released either way.
 func (p *Proxy) handleClient(client net.Conn) {
 	defer client.Close()
 
@@ -54,40 +45,25 @@ func (p *Proxy) handleClient(client net.Conn) {
 		return
 	}
 
-	cleanup, err := p.notifyStartup(info)
-	if err != nil {
-		return
-	}
-	if cleanup != nil {
-		defer cleanup()
+	if p.OnStartup != nil {
+		cleanup, err := p.OnStartup(info)
+		if err != nil {
+			return
+		}
+		if cleanup != nil {
+			defer cleanup()
+		}
 	}
 
-	backend, err := p.dialBackend(info)
+	backend, err := net.Dial("tcp", p.BackendAddr)
 	if err != nil {
 		return
 	}
 	defer backend.Close()
 
-	bridge(client, backend)
-}
-
-func (p *Proxy) notifyStartup(info *startup.Info) (func(), error) {
-	if p.OnStartup == nil {
-		return nil, nil
-	}
-	return p.OnStartup(info)
-}
-
-// dialBackend opens a TCP connection to the backend and replays the captured
-// startup message so the backend sees the same handshake the client sent.
-func (p *Proxy) dialBackend(info *startup.Info) (net.Conn, error) {
-	backend, err := net.Dial("tcp", p.BackendAddr)
-	if err != nil {
-		return nil, err
-	}
 	if _, err := info.WriteTo(backend); err != nil {
-		backend.Close()
-		return nil, err
+		return
 	}
-	return backend, nil
+
+	bridge(client, backend)
 }

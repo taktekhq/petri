@@ -1,17 +1,8 @@
-// Package startup negotiates the opening of a Postgres connection.
+// Package startup parses a Postgres client's opening handshake.
 //
-// A Postgres client may first send an SSLRequest or GSSEncRequest. The server
-// answers 'S' (yes), 'N' (no), or an error. Today we always answer 'N': petri
-// speaks plaintext to clients so it can inspect the StartupMessage that
-// follows. Tomorrow we may speak TLS, but plaintext is the simplest start.
-//
-// Once the (possibly second) message is a StartupMessage, we capture the
-// session parameters — database, user, application_name — and hand them to
-// the proxy, which decides where to forward.
-//
-// File map:
-//   - startup.go      – Info struct, Read, Info.WriteTo
-//   - startup_test.go – unit tests against net.Pipe + pgproto3 frontends
+// A client may first send an SSLRequest or GSSEncRequest; petri answers 'N'
+// (no encryption) so the rest of the conversation is plaintext we can inspect.
+// The next message is the StartupMessage, which carries user/database/etc.
 package startup
 
 import (
@@ -30,9 +21,8 @@ type Info struct {
 	raw *pgproto3.StartupMessage
 }
 
-// Read negotiates the startup phase with a Postgres client. SSL and GSS
-// requests are answered with 'N'; the resulting StartupMessage is parsed and
-// returned.
+// Read reads the client's startup phase, answering 'N' to SSL/GSS requests
+// and returning the parsed StartupMessage.
 func Read(rw io.ReadWriter) (*Info, error) {
 	be := pgproto3.NewBackend(rw, rw)
 	for {
@@ -42,11 +32,16 @@ func Read(rw io.ReadWriter) (*Info, error) {
 		}
 		switch m := msg.(type) {
 		case *pgproto3.SSLRequest, *pgproto3.GSSEncRequest:
-			if err := rejectEncryption(rw); err != nil {
-				return nil, err
+			if _, err := rw.Write([]byte{'N'}); err != nil {
+				return nil, fmt.Errorf("reject encryption: %w", err)
 			}
 		case *pgproto3.StartupMessage:
-			return fromMessage(m), nil
+			return &Info{
+				Database:        m.Parameters["database"],
+				User:            m.Parameters["user"],
+				ApplicationName: m.Parameters["application_name"],
+				raw:             m,
+			}, nil
 		case *pgproto3.CancelRequest:
 			return nil, fmt.Errorf("cancel requests are not supported yet")
 		default:
@@ -55,10 +50,9 @@ func Read(rw io.ReadWriter) (*Info, error) {
 	}
 }
 
-// WriteTo replays the captured StartupMessage to the backend. If the
-// caller mutated Database, User, or ApplicationName since Read, those changes
-// are reflected on the wire — Phase 3 uses this to redirect a client onto a
-// freshly-forked database.
+// WriteTo replays the captured StartupMessage to the backend. Mutations to
+// Database/User/ApplicationName since Read are reflected on the wire — the
+// forking hook uses this to redirect a client onto its fresh fork.
 func (i *Info) WriteTo(w io.Writer) (int64, error) {
 	syncParam(i.raw.Parameters, "user", i.User)
 	syncParam(i.raw.Parameters, "database", i.Database)
@@ -72,29 +66,12 @@ func (i *Info) WriteTo(w io.Writer) (int64, error) {
 	return int64(n), err
 }
 
-// syncParam mirrors a field back into the parameter map: a non-empty value
-// is set, an empty value removes the key so we don't emit a wire parameter
-// the client never asked for.
+// syncParam writes value back into params, or deletes the key when value is
+// empty — so clients that never sent a param don't see one on the wire.
 func syncParam(params map[string]string, key, value string) {
 	if value == "" {
 		delete(params, key)
 		return
 	}
 	params[key] = value
-}
-
-func rejectEncryption(w io.Writer) error {
-	if _, err := w.Write([]byte{'N'}); err != nil {
-		return fmt.Errorf("reject encryption: %w", err)
-	}
-	return nil
-}
-
-func fromMessage(m *pgproto3.StartupMessage) *Info {
-	return &Info{
-		Database:        m.Parameters["database"],
-		User:            m.Parameters["user"],
-		ApplicationName: m.Parameters["application_name"],
-		raw:             m,
-	}
 }
