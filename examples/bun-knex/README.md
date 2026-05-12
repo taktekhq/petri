@@ -28,10 +28,11 @@ test/
 
 ## Run it
 
-Everything runs inside compose — no ports are published to the host and
-no extra env vars are needed (the postgres service uses
-`POSTGRES_HOST_AUTH_METHOD=trust`, so the default `postgres` user/db
-work passwordless).
+Everything runs inside compose — no ports are published to the host.
+The postgres service sets `POSTGRES_USER=postgres` and
+`POSTGRES_PASSWORD=postgres` (the familiar postgres-image defaults);
+`src/db.ts` falls back to the same values, so no other env vars are
+needed.
 
 ```bash
 docker compose run --rm app bun install
