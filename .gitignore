@@ -1,0 +1,6 @@
+/petri
+/cmd/petri/petri
+*.test
+*.out
+.idea/
+.vscode/
