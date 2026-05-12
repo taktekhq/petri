@@ -5,15 +5,18 @@ import (
 	"database/sql"
 	"fmt"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
 	"github.com/testcontainers/testcontainers-go/wait"
 
+	"github.com/taktekhq/petri/internal/forker"
 	"github.com/taktekhq/petri/internal/proxy"
 	"github.com/taktekhq/petri/internal/startup"
 )
@@ -68,6 +71,31 @@ func TestProxy_OnStartup_CapturesApplicationName(t *testing.T) {
 	require.Equal(t, "my-test-app", captured.ApplicationName)
 	require.Equal(t, pgDatabase, captured.Database)
 	require.Equal(t, pgUser, captured.User)
+}
+
+// TestProxy_ForksDatabasePerConnection is Phase 3's headline test: when the
+// OnStartup hook forks every client into a UUID-named copy of their requested
+// database, two connections to the same logical database see fully independent
+// tables. They can even create the same table name without conflict.
+func TestProxy_ForksDatabasePerConnection(t *testing.T) {
+	backendAddr := startPostgres(t)
+	f := &forker.Forker{AdminDSN: adminDSN(backendAddr)}
+
+	proxyAddr := serveProxy(t, &proxy.Proxy{
+		BackendAddr: backendAddr,
+		OnStartup:   forkIntoUUID(f),
+	})
+
+	a := openPGX(t, proxyAddr, "client-a")
+	b := openPGX(t, proxyAddr, "client-b")
+
+	mustExec(t, a, "CREATE TABLE t (id int)")
+	mustExec(t, a, "INSERT INTO t VALUES (1)")
+	mustExec(t, b, "CREATE TABLE t (id int)")
+	mustExec(t, b, "INSERT INTO t VALUES (2)")
+
+	require.Equal(t, 1, scanInt(t, a, "SELECT id FROM t"))
+	require.Equal(t, 2, scanInt(t, b, "SELECT id FROM t"))
 }
 
 // TestProxy_ServeReturnsOnListenerClose pins the shutdown contract that test
@@ -154,4 +182,40 @@ func serveAsync(p *proxy.Proxy, ln net.Listener) <-chan error {
 	out := make(chan error, 1)
 	go func() { out <- p.Serve(ln) }()
 	return out
+}
+
+// adminDSN returns a DSN that authenticates as the test superuser against the
+// default "postgres" database — enough to run CREATE DATABASE.
+func adminDSN(addr string) string {
+	return fmt.Sprintf("postgres://%s:%s@%s/postgres?sslmode=disable",
+		pgUser, pgPassword, addr)
+}
+
+// forkIntoUUID is the minimal Phase 3 OnStartup hook: every client lands on
+// a freshly-forked copy of their requested database, named by a UUID.
+func forkIntoUUID(f *forker.Forker) func(*startup.Info) error {
+	return func(i *startup.Info) error {
+		name := "petri_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := f.Fork(ctx, i.Database, name); err != nil {
+			return err
+		}
+		i.Database = name
+		i.ApplicationName = name
+		return nil
+	}
+}
+
+func mustExec(t *testing.T, db *sql.DB, q string) {
+	t.Helper()
+	_, err := db.Exec(q)
+	require.NoError(t, err)
+}
+
+func scanInt(t *testing.T, db *sql.DB, q string) int {
+	t.Helper()
+	var n int
+	require.NoError(t, db.QueryRow(q).Scan(&n))
+	return n
 }

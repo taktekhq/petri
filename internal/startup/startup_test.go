@@ -96,6 +96,51 @@ func TestWriteTo_RoundTripsViaPgproto3(t *testing.T) {
 	require.Equal(t, "round-trip", decodeStartup(t, &buf).Parameters["application_name"])
 }
 
+// TestWriteTo_AppliesMutations is the Phase-3 contract: the OnStartup hook
+// mutates Info, and WriteTo emits the mutated values to the backend.
+func TestWriteTo_AppliesMutations(t *testing.T) {
+	server, client := pipe(t)
+	go sendStartup(client, map[string]string{
+		"user":             "alice",
+		"database":         "appdb",
+		"application_name": "original",
+	})
+
+	info := mustRead(t, server)
+	info.Database = "fork_xyz"
+	info.ApplicationName = "fork_xyz"
+
+	var buf bytes.Buffer
+	_, err := info.WriteTo(&buf)
+	require.NoError(t, err)
+
+	sm := decodeStartup(t, &buf)
+	require.Equal(t, "alice", sm.Parameters["user"])
+	require.Equal(t, "fork_xyz", sm.Parameters["database"])
+	require.Equal(t, "fork_xyz", sm.Parameters["application_name"])
+}
+
+// TestWriteTo_RemovesParamWhenClearedToEmpty pins the contract that clearing
+// a field to "" removes it from the wire, rather than emitting an empty value.
+func TestWriteTo_RemovesParamWhenClearedToEmpty(t *testing.T) {
+	server, client := pipe(t)
+	go sendStartup(client, map[string]string{
+		"user":             "alice",
+		"database":         "appdb",
+		"application_name": "original",
+	})
+
+	info := mustRead(t, server)
+	info.ApplicationName = ""
+
+	var buf bytes.Buffer
+	_, err := info.WriteTo(&buf)
+	require.NoError(t, err)
+
+	_, present := decodeStartup(t, &buf).Parameters["application_name"]
+	require.False(t, present, "application_name should be removed, not blanked")
+}
+
 // ---- helpers ----
 
 func pipe(t *testing.T) (server, client net.Conn) {

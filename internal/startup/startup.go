@@ -55,15 +55,32 @@ func Read(rw io.ReadWriter) (*Info, error) {
 	}
 }
 
-// WriteTo replays the captured StartupMessage so the backend sees the same
-// handshake the client sent us.
+// WriteTo replays the captured StartupMessage to the backend. If the
+// caller mutated Database, User, or ApplicationName since Read, those changes
+// are reflected on the wire — Phase 3 uses this to redirect a client onto a
+// freshly-forked database.
 func (i *Info) WriteTo(w io.Writer) (int64, error) {
+	syncParam(i.raw.Parameters, "user", i.User)
+	syncParam(i.raw.Parameters, "database", i.Database)
+	syncParam(i.raw.Parameters, "application_name", i.ApplicationName)
+
 	buf, err := i.raw.Encode(nil)
 	if err != nil {
 		return 0, fmt.Errorf("encode startup: %w", err)
 	}
 	n, err := w.Write(buf)
 	return int64(n), err
+}
+
+// syncParam mirrors a field back into the parameter map: a non-empty value
+// is set, an empty value removes the key so we don't emit a wire parameter
+// the client never asked for.
+func syncParam(params map[string]string, key, value string) {
+	if value == "" {
+		delete(params, key)
+		return
+	}
+	params[key] = value
 }
 
 func rejectEncryption(w io.Writer) error {

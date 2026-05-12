@@ -1,14 +1,24 @@
 // Command petri starts the proxy. Configuration comes from environment
 // variables so it drops into a docker-compose stack with no flag wiring.
+//
+// Set PETRI_ADMIN_DSN to a superuser DSN and each client connection will
+// land on its own forked database, named by a fresh UUID. Without
+// PETRI_ADMIN_DSN, petri runs as a transparent proxy.
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"os"
+	"strings"
+	"time"
 
+	"github.com/google/uuid"
+
+	"github.com/taktekhq/petri/internal/forker"
 	"github.com/taktekhq/petri/internal/proxy"
 	"github.com/taktekhq/petri/internal/startup"
 )
@@ -23,12 +33,14 @@ func main() {
 type config struct {
 	ListenAddr  string
 	BackendAddr string
+	AdminDSN    string // optional: enables per-connection forking when set
 }
 
 func loadConfig(getenv func(string) string) (config, error) {
 	cfg := config{
 		ListenAddr:  getenv("PETRI_LISTEN_ADDR"),
 		BackendAddr: getenv("PETRI_BACKEND_ADDR"),
+		AdminDSN:    getenv("PETRI_ADMIN_DSN"),
 	}
 	if cfg.ListenAddr == "" {
 		cfg.ListenAddr = ":5432"
@@ -50,16 +62,62 @@ func run(getenv func(string) string, logs io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("listen %s: %w", cfg.ListenAddr, err)
 	}
-	fmt.Fprintf(logs, "petri listening on %s, forwarding to %s\n", ln.Addr(), cfg.BackendAddr)
+	fmt.Fprintf(logs, "petri listening on %s, forwarding to %s (forking=%t)\n",
+		ln.Addr(), cfg.BackendAddr, cfg.AdminDSN != "")
 
 	p := &proxy.Proxy{
 		BackendAddr: cfg.BackendAddr,
-		OnStartup:   logConnections(logs),
+		OnStartup:   buildOnStartup(cfg, logs),
 	}
 	return p.Serve(ln)
 }
 
-// logConnections returns an OnStartup hook that prints one line per client.
+// buildOnStartup picks the right hook based on config: a forking hook when
+// PETRI_ADMIN_DSN is set, a logging-only hook otherwise.
+func buildOnStartup(cfg config, logs io.Writer) func(*startup.Info) error {
+	if cfg.AdminDSN == "" {
+		return logConnections(logs)
+	}
+	return forkPerConnection(&forker.Forker{AdminDSN: cfg.AdminDSN}, logs)
+}
+
+// forkerAPI is the slice of Forker we depend on, so tests can substitute a
+// fake without spinning up a real Postgres.
+type forkerAPI interface {
+	Fork(ctx context.Context, templateName, forkName string) error
+}
+
+// forkPerConnection returns an OnStartup hook that gives every client its own
+// freshly-forked database. The fork name and application_name are both
+// rewritten to a UUID so the connection is fully isolated and traceable.
+func forkPerConnection(f forkerAPI, logs io.Writer) func(*startup.Info) error {
+	return func(i *startup.Info) error {
+		template := i.Database
+		forkName := newForkName()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		if err := f.Fork(ctx, template, forkName); err != nil {
+			fmt.Fprintf(logs, "fork failed (template=%q): %v\n", template, err)
+			return err
+		}
+		fmt.Fprintf(logs, "forked %q -> %q (client app=%q user=%q)\n",
+			template, forkName, i.ApplicationName, i.User)
+
+		i.Database = forkName
+		i.ApplicationName = forkName
+		return nil
+	}
+}
+
+// newForkName returns a Postgres-safe identifier built from a UUID.
+// Dashes are stripped so the name doesn't need quoting in casual usage.
+func newForkName() string {
+	return "petri_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+}
+
+// logConnections is the Phase-2 hook: just print one line per client.
 func logConnections(logs io.Writer) func(*startup.Info) error {
 	return func(i *startup.Info) error {
 		fmt.Fprintf(logs, "client connected: app=%q db=%q user=%q\n",
