@@ -19,7 +19,8 @@ import (
 
 func TestLoadConfig_Defaults(t *testing.T) {
 	cfg := loadConfig(env{}.lookup())
-	require.Equal(t, ":5432", cfg.ListenAddr)
+	require.Equal(t, ":5432", cfg.PassthroughAddr)
+	require.Equal(t, ":5433", cfg.ForkAddr)
 	require.Equal(t, "5432", cfg.BackendPort)
 	require.Equal(t, "postgres", cfg.AdminUser)
 	require.Empty(t, cfg.AdminPassword)
@@ -27,38 +28,60 @@ func TestLoadConfig_Defaults(t *testing.T) {
 
 func TestLoadConfig_ReadsPostgresEnvVars(t *testing.T) {
 	cfg := loadConfig(env{
-		"PGPORT":            "5433",
+		"PGPORT":            "5434",
 		"POSTGRES_USER":     "adminbob",
 		"POSTGRES_PASSWORD": "s3cret",
 	}.lookup())
-	require.Equal(t, "5433", cfg.BackendPort)
+	require.Equal(t, "5434", cfg.BackendPort)
 	require.Equal(t, "adminbob", cfg.AdminUser)
 	require.Equal(t, "s3cret", cfg.AdminPassword)
 }
 
-func TestLoadConfig_OverridesListenAddr(t *testing.T) {
-	cfg := loadConfig(env{"PETRI_LISTEN_ADDR": "0.0.0.0:6543"}.lookup())
-	require.Equal(t, "0.0.0.0:6543", cfg.ListenAddr)
+func TestLoadConfig_OverridesPassthroughAndForkAddrs(t *testing.T) {
+	cfg := loadConfig(env{
+		"PETRI_PASSTHROUGH_ADDR": "0.0.0.0:6543",
+		"PETRI_FORK_ADDR":        "0.0.0.0:6544",
+	}.lookup())
+	require.Equal(t, "0.0.0.0:6543", cfg.PassthroughAddr)
+	require.Equal(t, "0.0.0.0:6544", cfg.ForkAddr)
 }
 
 // ---- run ----
 
-func TestRun_FailsOnBusyListenAddr(t *testing.T) {
+func TestRun_FailsOnBusyPassthroughAddr(t *testing.T) {
 	busy := bindAndHold(t)
-	err := run(env{"PETRI_LISTEN_ADDR": busy.Addr().String()}.lookup(), io.Discard)
-	require.ErrorContains(t, err, "listen")
+	err := run(env{
+		"PETRI_PASSTHROUGH_ADDR": busy.Addr().String(),
+		"PETRI_FORK_ADDR":        pickFreeAddr(t),
+	}.lookup(), io.Discard)
+	require.ErrorContains(t, err, "listen passthrough")
 }
 
-func TestRun_StartsListenerAndLogsAddress(t *testing.T) {
-	listenAddr := pickFreeAddr(t)
+func TestRun_FailsOnBusyForkAddr(t *testing.T) {
+	busy := bindAndHold(t)
+	err := run(env{
+		"PETRI_PASSTHROUGH_ADDR": pickFreeAddr(t),
+		"PETRI_FORK_ADDR":        busy.Addr().String(),
+	}.lookup(), io.Discard)
+	require.ErrorContains(t, err, "listen fork")
+}
+
+func TestRun_StartsBothListenersAndLogsAddresses(t *testing.T) {
+	passthroughAddr := pickFreeAddr(t)
+	forkAddr := pickFreeAddr(t)
 	logs := &bytes.Buffer{}
-	go run(env{"PETRI_LISTEN_ADDR": listenAddr}.lookup(), logs)
+	go run(env{
+		"PETRI_PASSTHROUGH_ADDR": passthroughAddr,
+		"PETRI_FORK_ADDR":        forkAddr,
+	}.lookup(), logs)
 
 	waitForLog(t, logs, "petri listening")
 
-	conn, err := net.Dial("tcp", listenAddr)
-	require.NoError(t, err)
-	require.NoError(t, conn.Close())
+	for _, addr := range []string{passthroughAddr, forkAddr} {
+		conn, err := net.Dial("tcp", addr)
+		require.NoError(t, err, "dial %s", addr)
+		require.NoError(t, conn.Close())
+	}
 }
 
 // ---- forkPerConnection ----
