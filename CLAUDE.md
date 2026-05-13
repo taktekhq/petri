@@ -11,14 +11,17 @@ as before; tests opt in to forking by hitting `:5433`.
 ## Layout
 
 ```
-cmd/petri/        main + forkPerConnection hook
-internal/proxy/   Serve loop, handleClient, bridge
-internal/startup/ StartupMessage parse + replay
-internal/forker/  CREATE/DROP DATABASE
-docker/           entrypoint that backgrounds postgres, execs petri
-e2e/              builds petri:test, drives it through real pgx
-Dockerfile        golang:alpine builds petri → postgres:alpine bundles it
-vendor/           gitignored; `go mod vendor` for offline builds
+cmd/petri/           main + forkPerConnection hook
+internal/proxy/      Serve loop, handleClient, bridge
+internal/startup/    StartupMessage parse + replay
+internal/forker/     CREATE/DROP DATABASE
+internal/adapters/   empty — reserved for future adapters
+internal/seed/       empty — reserved for future seed helpers
+docker/              entrypoint that backgrounds postgres, execs petri
+e2e/                 builds petri:test, drives it through real pgx
+examples/bun-knex/   before/after demo: bun + knex, users + posts FK
+Dockerfile           golang:alpine builds petri → postgres:alpine bundles it
+vendor/              gitignored; `go mod vendor` for offline builds
 ```
 
 Every `*.go` has a matching `_test.go`.
