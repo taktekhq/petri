@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 
 def db_url() -> str:
     port = os.environ.get("PORT", "5432")
-    return f"postgresql://postgres:postgres@postgres:{port}/postgres"
+    return f"postgresql+psycopg://postgres:postgres@postgres:{port}/postgres"
 
 
 def get_db():
