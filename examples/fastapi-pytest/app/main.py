@@ -1,4 +1,5 @@
 from fastapi import FastAPI, Depends, HTTPException
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 from .database import get_db
 from . import models
@@ -10,7 +11,7 @@ app = FastAPI()
 def list_users(db: Session = Depends(get_db)):
     return [
         {"id": u.id, "name": u.name, "email": u.email}
-        for u in db.query(models.User).order_by(models.User.id)
+        for u in db.execute(select(models.User).order_by(models.User.id)).scalars()
     ]
 
 
@@ -35,5 +36,5 @@ def delete_user(user_id: int, db: Session = Depends(get_db)):
 def list_posts(db: Session = Depends(get_db)):
     return [
         {"id": p.id, "user_id": p.user_id, "title": p.title}
-        for p in db.query(models.Post).order_by(models.Post.id)
+        for p in db.execute(select(models.Post).order_by(models.Post.id)).scalars()
     ]
