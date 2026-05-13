@@ -15,12 +15,3 @@ export const withApp = async <T>(fn: (app: App) => Promise<T>): Promise<T> => {
     await db.destroy();
   }
 };
-
-// Tiny JSON-body helper. Hono's app.request() accepts the same init
-// object as fetch(); this just bakes in the header + JSON.stringify.
-export const send = (app: App, path: string, method: string, body?: unknown) =>
-  app.request(path, {
-    method,
-    headers: { 'content-type': 'application/json' },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });

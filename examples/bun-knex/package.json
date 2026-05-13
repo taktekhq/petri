@@ -5,7 +5,9 @@
   "scripts": {
     "migrate": "bun run src/migrate.ts",
     "start": "bun run src/server.ts",
-    "test": "PGPORT=5433 bun test"
+    "test": "bun test",
+    "test:before": "bun run migrate && PGPORT=5432 bun test",
+    "test:after": "bun run migrate && bun test"
   },
   "dependencies": {
     "hono": "^4.6.13",

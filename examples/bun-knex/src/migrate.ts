@@ -5,8 +5,7 @@ import { newDB } from './db';
 // template DB; every fork on :5433 inherits them.
 const db = newDB();
 
-await db.schema.dropTableIfExists('products');
-await db.schema.dropTableIfExists('stores');
+await db.schema.dropTableIfExists('posts');
 await db.schema.dropTableIfExists('users');
 
 await db.schema.createTable('users', (t) => {
@@ -15,17 +14,10 @@ await db.schema.createTable('users', (t) => {
   t.string('name').notNullable();
 });
 
-await db.schema.createTable('stores', (t) => {
+await db.schema.createTable('posts', (t) => {
   t.increments('id');
-  t.string('name').notNullable();
-  t.string('slug').notNullable().unique();
-});
-
-await db.schema.createTable('products', (t) => {
-  t.increments('id');
-  t.integer('store_id').notNullable().references('id').inTable('stores').onDelete('CASCADE');
-  t.string('name').notNullable();
-  t.integer('price_cents').notNullable();
+  t.integer('user_id').notNullable().references('id').inTable('users').onDelete('CASCADE');
+  t.string('title').notNullable();
 });
 
 await db('users').insert([
@@ -33,15 +25,10 @@ await db('users').insert([
   { email: 'bob@example.com', name: 'Bob' },
 ]);
 
-await db('stores').insert([
-  { name: 'Corner Shop', slug: 'corner-shop' },
-  { name: 'Big Box', slug: 'big-box' },
-]);
-
-await db('products').insert([
-  { store_id: 1, name: 'Apple', price_cents: 50 },
-  { store_id: 1, name: 'Bread', price_cents: 300 },
-  { store_id: 2, name: 'TV', price_cents: 49900 },
+await db('posts').insert([
+  { user_id: 1, title: 'Hello from Alice' },
+  { user_id: 1, title: 'Alice again' },
+  { user_id: 2, title: 'Hello from Bob' },
 ]);
 
 await db.destroy();
