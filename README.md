@@ -32,6 +32,8 @@ Run against `:5432`. Writes land on the template; every fork inherits them.
 
 [`examples/bun-knex`](examples/bun-knex/) — before/after with Bun + Knex. Shows what breaks without isolation and what passes with it.
 
+[`examples/fastapi-pytest`](examples/fastapi-pytest/) — before/after with FastAPI + pytest. Same pattern in Python.
+
 ## How it works
 
 See [HOWITWORKS.md](HOWITWORKS.md).
