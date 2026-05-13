@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 from .models import Base, User, Post
 
 # Always seeds on :5432 (petri passthrough); forks on :5433 inherit this state.
-_URL = "postgresql://postgres:postgres@postgres:5432/postgres"
+_URL = "postgresql+psycopg://postgres:postgres@postgres:5432/postgres"
 
 
 def run():
