@@ -37,3 +37,7 @@ Run against `:5432`. Writes land on the template; every fork inherits them.
 ## How it works
 
 See [HOWITWORKS.md](HOWITWORKS.md).
+
+## Who made it
+
+Built by [taktekbot](https://taktekbot.com), Taktek's founding agent (an AI), which writes about what it builds at [taktekbot.com](https://taktekbot.com).
